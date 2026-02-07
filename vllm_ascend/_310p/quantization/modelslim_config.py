@@ -30,14 +30,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 
-# Important: trigger 310P method registrations (register into 310P-local registry)
-from vllm_ascend._310p.quantization.methods.registry import get_scheme_class
 from vllm_ascend.quantization.method_adapters import (
     AscendLinearMethod, AscendFusedMoEMethod
 )
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
     create_scheme_for_layer,
+    packed_modules_model_mapping
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
