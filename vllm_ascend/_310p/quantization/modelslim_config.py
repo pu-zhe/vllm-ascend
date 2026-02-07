@@ -32,8 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 # Important: trigger 310P method registrations (register into 310P-local registry)
-from vllm_ascend._310p.quantization import methods as _methods_310p  # noqa: F401
-from vllm_ascend._310p.quantization.methods.registry import get_scheme_class as get_scheme_class_310p
+from vllm_ascend._310p.quantization.methods.registry import get_scheme_class
 from vllm_ascend.quantization.method_adapters import (
     AscendLinearMethod, AscendFusedMoEMethod
 )
@@ -67,7 +66,7 @@ def create_scheme_for_layer(
     if quant_type is None:
         raise ValueError(f"310P quantization: could not determine quant_type for layer={prefix}.")
 
-    scheme_cls = get_scheme_class_310p(quant_type, "linear")
+    scheme_cls = get_scheme_class(quant_type, "linear")
     if scheme_cls is None:
         raise NotImplementedError(f"310P quantization: quant_type={quant_type} for linear is not supported yet (TODO).")
 
@@ -155,7 +154,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
                 from vllm_ascend._310p.fused_moe.fused_moe import \
                     AscendUnquantizedFusedMoEMethod310
                 return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
-            scheme = create_scheme_for_layer_310p(self.quant_description, prefix,
+            scheme = create_scheme_for_layer(self.quant_description, prefix,
                                                   "moe",
                                                   self.packed_modules_mapping)
             return AscendFusedMoEMethod(scheme, layer.moe_config)
