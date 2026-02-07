@@ -28,6 +28,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     group_list: torch.Tensor,
                     group_list_type: int = 1) -> torch.Tensor:
     if group_list_type == 1:
+        # Convert group_list to cumulative sum format if group_list is count format
         group_list = torch.cumsum(group_list, dim=0)
 
     hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(

@@ -69,7 +69,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             num_experts,
             2 * intermediate_size_per_partition,
             1,
-            dtype=torch.float32)
+            dtype=params_dtype)
         param_dict["w13_weight_offset"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
@@ -78,7 +78,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         param_dict["w2_weight_scale"] = torch.empty(num_experts,
                                                     hidden_sizes,
                                                     1,
-                                                    dtype=torch.float32)
+                                                    dtype=params_dtype)
         param_dict["w2_weight_offset"] = torch.empty(num_experts,
                                                      hidden_sizes,
                                                      1,
@@ -159,10 +159,10 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
-            layer.w13_weight_scale.data.shape[0], -1)
+            layer.w13_weight_scale.data.shape[0], -1).to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
             layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(
-            layer.w2_weight_scale.data.shape[0], -1)
+            layer.w2_weight_scale.data.shape[0], -1).to(torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
