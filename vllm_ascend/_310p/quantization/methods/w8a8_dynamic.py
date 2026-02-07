@@ -69,7 +69,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             num_experts,
             2 * intermediate_size_per_partition,
             1,
-            dtype=torch.int64)
+            dtype=torch.float32)
         param_dict["w13_weight_offset"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
@@ -78,7 +78,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         param_dict["w2_weight_scale"] = torch.empty(num_experts,
                                                     hidden_sizes,
                                                     1,
-                                                    dtype=torch.int64)
+                                                    dtype=torch.float32)
         param_dict["w2_weight_offset"] = torch.empty(num_experts,
                                                      hidden_sizes,
                                                      1,
@@ -152,21 +152,12 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             topk_ids=topk_ids,
             expert_map=expert_map,
             use_int8_w8a8=True,
-            apply_router_weight_on_input=apply_router_weight_on_input,
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(
-            1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(
-            1, 2).contiguous()
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(

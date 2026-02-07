@@ -48,7 +48,9 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
                       w2: torch.Tensor,
                       group_list: torch.Tensor,
                       group_list_type: int = 1) -> torch.Tensor:
-
+    if group_list_type == 1:
+        group_list = torch.cumsum(group_list, dim=0)
+    
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
