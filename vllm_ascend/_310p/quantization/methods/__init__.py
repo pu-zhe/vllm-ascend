@@ -16,7 +16,4 @@
 #
 
 from . import w8a8_static  # noqa: F401
-
-# Future extensions:
-# from . import w8a8_dynamic  # noqa: F401
-# from . import w4a16         # noqa: F401
+from . import w8a8_dynamic  # noqa: F401

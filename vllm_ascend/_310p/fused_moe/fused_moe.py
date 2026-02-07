@@ -212,17 +212,17 @@ class AscendFusedMoE310(FusedMoE):
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
             layer=self,
             x=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.local_expert_map,
+            top_k=self.top_k,
+            router_logits=router_logits,
+            renormalize=self.renormalize,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.local_expert_map,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
