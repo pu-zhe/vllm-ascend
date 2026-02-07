@@ -21,7 +21,6 @@ from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -38,39 +37,9 @@ from vllm_ascend.quantization.method_adapters import (
 )
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
-    packed_modules_model_mapping,
+    create_scheme_for_layer,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
-
-logger = init_logger(__name__)
-
-
-def create_scheme_for_layer(
-    cfg: AscendModelSlimConfig,
-    quant_description: dict[str, Any],
-    prefix: str,
-    layer_type: str,
-    packed_modules_mapping: dict[str, Any] | None = None,
-):
-    """Create 310P quant scheme (mainline-like).
-
-    - If quant_type cannot be determined: raise ValueError
-    - If quant_type is determined but not supported on 310P: raise NotImplementedError
-    """
-    logger.info_once("Using 310P ModelSlim Quantization routing.")
-
-    if layer_type != "linear":
-        raise NotImplementedError(f"310P quantization: layer_type={layer_type} is not supported yet (TODO).")
-
-    quant_type = cfg._get_linear_quant_type(prefix)
-    if quant_type is None:
-        raise ValueError(f"310P quantization: could not determine quant_type for layer={prefix}.")
-
-    scheme_cls = get_scheme_class(quant_type, "linear")
-    if scheme_cls is None:
-        raise NotImplementedError(f"310P quantization: quant_type={quant_type} for linear is not supported yet (TODO).")
-
-    return scheme_cls()
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -82,41 +51,6 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
       fused modules (qkv_proj / gate_up_proj) will miss and fallback to base,
       causing NZ/transpose issues on 310P.
     """
-
-    def _get_linear_quant_type(self, prefix: str) -> str | None:
-        """Packed-aware quant type lookup.
-
-        ModelSlim may describe fused modules by their shards.
-        Example:
-          prefix = "...qkv_proj" -> shards "...q_proj.weight", "...k_proj.weight", "...v_proj.weight"
-        """
-        fused_mapping = getattr(self, "packed_modules_mapping", {}) or {}
-        proj_name = prefix.split(".")[-1]
-
-        if proj_name in fused_mapping:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
-            ]
-            quant_types: list[str] = []
-            for sp in shard_prefixes:
-                qt = self.quant_description.get(sp + ".weight")
-                if isinstance(qt, str):
-                    quant_types.append(qt)
-
-            if not quant_types:
-                return None
-
-            first = quant_types[0]
-            if any(q != first for q in quant_types[1:]):
-                raise ValueError(
-                    f"310P quantization: not all shards of fused layer '{prefix}' "
-                    f"share the same quant type. shards={shard_prefixes}, types={quant_types}"
-                )
-            return first
-
-        qt = self.quant_description.get(prefix + ".weight")
-        return qt if isinstance(qt, str) else None
-
     def get_quant_method(
         self,
         layer: torch.nn.Module,
@@ -155,8 +89,8 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
                     AscendUnquantizedFusedMoEMethod310
                 return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix,
-                                                  "moe",
-                                                  self.packed_modules_mapping)
+                                             "moe",
+                                             self.packed_modules_mapping)
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):
