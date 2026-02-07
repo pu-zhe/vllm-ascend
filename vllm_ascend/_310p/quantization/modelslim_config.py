@@ -35,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm_ascend._310p.quantization import methods as _methods_310p  # noqa: F401
 from vllm_ascend._310p.quantization.methods.registry import get_scheme_class as get_scheme_class_310p
 from vllm_ascend.quantization.method_adapters import (
-    AscendLinearMethod,
+    AscendLinearMethod, AscendFusedMoEMethod
 )
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
@@ -149,14 +149,18 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             )
             return AscendLinearMethod(scheme)
 
-        if isinstance(layer, VocabParallelEmbedding):
-            return UnquantizedEmbeddingMethod()
+        elif isinstance(layer, FusedMoE):
+            if self.is_layer_skipped_ascend(prefix,
+                                            self.packed_modules_mapping):
+                from vllm_ascend._310p.fused_moe.fused_moe import \
+                    AscendUnquantizedFusedMoEMethod310
+                return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
+            scheme = create_scheme_for_layer_310p(self.quant_description, prefix,
+                                                  "moe",
+                                                  self.packed_modules_mapping)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
 
-        if isinstance(layer, FusedMoE):
-            raise NotImplementedError(
-                "310P quantization: FusedMoE is not supported yet. "
-                "TODO: add 310P MoE quant schemes and routing. "
-                "Workaround: use a non-MoE model."
-            )
+        elif isinstance(layer, VocabParallelEmbedding):
+            return UnquantizedEmbeddingMethod()
 
         return super().get_quant_method(layer, prefix)
