@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -35,10 +36,47 @@ from vllm_ascend.quantization.method_adapters import (
 )
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
-    create_scheme_for_layer,
+    get_quant_type_for_layer,
     packed_modules_model_mapping
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend._310p.quantization.methods.registry import (
+    get_scheme_class,
+)
+
+
+logger = init_logger(__name__)
+
+
+def create_scheme_for_layer(
+    quant_description: dict[str, Any],
+    prefix: str,
+    layer_type: str,
+    packed_modules_mapping: dict[str, Any] | None = None,
+):
+    """Create a quantization scheme instance for a layer.
+
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+
+    Returns:
+        An instance of the appropriate quantization scheme class.
+    """
+    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
+    quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
+
+    if quant_type is None:
+        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+
+    # Use registry to get scheme class
+    scheme_cls = get_scheme_class(quant_type, layer_type)
+    if scheme_cls is not None:
+        return scheme_cls()
+
+    raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -73,7 +111,6 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
                 return AscendUnquantizedLinearMethod()
 
             scheme = create_scheme_for_layer(
-                cfg=self,
                 quant_description=self.quant_description,
                 prefix=prefix,
                 layer_type="linear",
