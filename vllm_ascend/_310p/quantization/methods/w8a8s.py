@@ -15,12 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
-
 import torch
 import torch_npu
-
-from vllm_ascend.quantization.methods.base import AscendLinearScheme
 
 from .registry import register_scheme
 from .w8a8_static import AscendW8A8LinearMethod310
