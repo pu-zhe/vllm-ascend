@@ -41,10 +41,11 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
         params_dtype: torch.dtype = torch.float16,
     ) -> dict[str, Any]:
         self.input_size = input_size
-        index_len = math.ceil(input_size / 256) * math.ceil(input_size / 128) * 8
+        index_len = math.ceil(input_size / 256) * math.ceil(output_size / 128) * 8
         return {
             "weight": torch.empty(input_size * output_size, dtype=torch.int8),
-            "index": torch.empty(index_len, dtype=torch.int8)
+            "index": torch.empty(index_len, dtype=torch.int8),
+            "info": torch.empty(5, dtype=torch.int64),
         }
 
     def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
@@ -54,10 +55,10 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
         }
 
     def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        params: dict[str, Any] = {}
-        params["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
-        params["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
-        return params
+        return {
+            "quant_bias": torch.empty(output_size, dtype=torch.int32),
+            "deq_scale": torch.empty(output_size, dtype=torch.int64),
+        }
 
     def apply(
         self,

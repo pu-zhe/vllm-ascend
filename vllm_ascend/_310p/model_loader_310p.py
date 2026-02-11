@@ -1,4 +1,5 @@
-
+import os
+import json
 import torch
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
@@ -20,6 +21,18 @@ class ShardedStateLoader310(ShardedStateLoader):
         pattern: str | None = None,
         max_size: int | None = None,
     ) -> None:
+        quantize_type = model.quant_config.quant_description.get("model_quant_type", "FLOAT")
+        if quantize_type == "W8A8S":
+            ShardedStateLoader310.save_model_compress(model, path, pattern=pattern)
+        else:
+            super().save_model(model, path, pattern=pattern, max_size=max_size)
+    
+    @staticmethod
+    def save_model_compress(
+        model: torch.nn.Module,
+        path: str,
+        pattern: str | None = None,
+    ) -> None:
         if pattern is None:
             pattern = ShardedStateLoader310.DEFAULT_PATTERN
         rank = get_tensor_model_parallel_rank()
@@ -32,6 +45,7 @@ class ShardedStateLoader310(ShardedStateLoader):
         compressor.run()
         filename = pattern.format(rank=rank, part=part_idx)
         compressor.export_safetensors(path, safetensors_name=filename)
+        ShardedStateLoader310.save_quant_model_description(quant_model_description, path)
             
     @staticmethod
     def generate_module_type_map(model: torch.nn.Module):
@@ -61,3 +75,20 @@ class ShardedStateLoader310(ShardedStateLoader):
             else:
                 quant_model_description[name] = 'FLOAT'
         return quant_model_description
+    
+    @staticmethod
+    def save_quant_model_description(quant_model_description: dict[str, str], path):
+        target_quant_model_description = {}
+        for key, value in quant_model_description.items():
+            if key.endswith('.weight') and value == 'W8A8S':
+                target_quant_model_description[key] = 'W8A8SC'
+                base_key = key[:-7]
+                target_quant_model_description[base_key + '.index'] = 'W8A8SC'
+                target_quant_model_description[base_key + '.info'] = 'W8A8SC'
+            else:
+                target_quant_model_description[key] = value
+        
+        json_path = os.path.join(path, "quant_model_description.json")
+
+        with open(json_path, 'w', encoding="utf-8") as f:
+            json.dump(target_quant_model_description, f, indent=2, ensure_ascii=False)
