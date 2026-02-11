@@ -40,6 +40,25 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
         output_size: int,
         params_dtype: torch.dtype = torch.float16,
     ) -> dict[str, Any]:
+        """
+        Get the weight tensors for the W8A8SC quantization scheme.
+        
+        Args:
+            input_size: Size of the input dimension (k)
+            output_size: Size of the output dimension (n)
+            params_dtype: Data type for parameters, default is torch.float16
+            
+        Returns:
+            A dictionary containing:
+            - "weight": The compressed weight tensor with shape [c], where c is greater than 0 
+              and not larger than k * n
+            - "index": Compression index generated simultaneously with compressed weights, 
+              with shape [x], where x = k_index * n_index * 8, k_index = ceil(k1 / tilingK), 
+              n_index = ceil(n1 / tilingN), k1 = k / 32, n1 = n / 16
+            - "info": Compression information with length 5, containing compression block 
+              information tilingN, tilingK, original shape of the pre-compression x2 matrix, 
+              and identifier for the compression block traversal direction
+        """
         self.input_size = input_size
         index_len = math.ceil(input_size / 256) * math.ceil(output_size / 128) * 8
         return {
@@ -89,5 +108,3 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
         layer.aclnn_input_scale = layer.input_scale.data.repeat(self.input_size)
         layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale.data
         layer.aclnn_input_offset = layer.input_offset.data.repeat(self.input_size).to(layer.aclnn_input_scale.dtype)
-        layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
-        layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
