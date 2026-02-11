@@ -34,3 +34,18 @@ class NPUWorker310(NPUWorker):
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
         logger.info("Skip warm-up atb ops for 310P device.")
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        from vllm_ascend._310p.model_loader_310p import ShardedStateLoader310
+
+        ShardedStateLoader310.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
