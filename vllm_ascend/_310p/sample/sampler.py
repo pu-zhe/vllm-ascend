@@ -16,7 +16,7 @@
 #
 
 import torch
-import vllm.envs as envs
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 from vllm_ascend.sample.sampler import (
     DEFAULT_LOGPROBS_MODE,
@@ -46,7 +46,7 @@ def _random_sample_310p(
 
 class AscendTopKTopPSampler310(AscendTopKTopPSampler):
     def forward_native(self, logits, generators, k, p):
-        if envs.VLLM_BATCH_INVARIANT:
+        if vllm_is_batch_invariant():
             return super().forward_native(logits, generators, k, p)
 
         logits = self.apply_top_k_top_p(logits, k, p)
