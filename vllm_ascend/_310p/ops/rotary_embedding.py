@@ -57,7 +57,7 @@ def set_mrope_apply_rotary_slices(
     *,
     mrope_section: list[int] | None = None,
     mrope_interleaved: bool = False,
-    capacity_tokens: int | None = None,
+    capacity_tokens: int = 0,
 ) -> None:
     """Build cos/sin views for `npu_apply_rotary_pos_emb` from positions; must run once per forward before layers."""
     global _mrope_cos_slice
