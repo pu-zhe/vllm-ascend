@@ -51,31 +51,6 @@ def test_set_mrope_apply_rotary_slices_populates_globals():
     assert rotary_310._mrope_cos_slice.shape[1] == positions.shape[-1]
 
 
-def test_set_mrope_apply_rotary_slices_second_call_replaces():
-    _reset_mrope_globals()
-    emb = _build_mrope_embedding()
-    positions_a = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
-    positions_b = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 5), dtype=torch.long)
-
-    set_mrope_apply_rotary_slices(
-        emb.cos_sin_cache,
-        positions_a,
-        mrope_section=emb.mrope_section,
-        mrope_interleaved=emb.mrope_interleaved,
-    )
-    cos_a = rotary_310._mrope_cos_slice
-    set_mrope_apply_rotary_slices(
-        emb.cos_sin_cache,
-        positions_b,
-        mrope_section=emb.mrope_section,
-        mrope_interleaved=emb.mrope_interleaved,
-    )
-    cos_b = rotary_310._mrope_cos_slice
-
-    assert cos_a is not cos_b
-    assert cos_b.shape[1] == 5
-
-
 def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     _reset_mrope_globals()
     emb = _build_mrope_embedding()

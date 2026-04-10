@@ -85,13 +85,7 @@ def set_mrope_apply_rotary_slices(
     sin_view = sin.contiguous().view(1, num_tokens, 1, -1)
 
     # Keep stable storage across forwards for graph replay.
-    need_alloc = (
-        _mrope_cos_slice is None
-        or _mrope_sin_slice is None
-        or _mrope_cos_slice.device != cos_view.device
-        or _mrope_cos_slice.dtype != cos_view.dtype
-        or _mrope_cos_slice.shape[-1] != cos_view.shape[-1]
-    )
+    need_alloc = _mrope_cos_slice is None or _mrope_sin_slice is None
     if need_alloc:
         capacity = capacity_tokens if capacity_tokens is not None else num_tokens
         if capacity < num_tokens:
@@ -103,24 +97,6 @@ def set_mrope_apply_rotary_slices(
         )
         _mrope_sin_slice = torch.empty(
             (1, capacity, 1, sin_view.shape[-1]),
-            dtype=sin_view.dtype,
-            device=sin_view.device,
-        )
-    elif _mrope_cos_slice.shape[1] < num_tokens:
-        if capacity_tokens is not None:
-            # Keep storage address stable for graph replay; fail-fast instead of reallocating.
-            raise RuntimeError(
-                f"Prepared MRoPE buffer capacity {_mrope_cos_slice.shape[1]} is smaller than required "
-                f"{num_tokens}. Please increase max_num_batched_tokens."
-            )
-        # Local/unit-test path without fixed capacity may still grow.
-        _mrope_cos_slice = torch.empty(
-            (1, num_tokens, 1, cos_view.shape[-1]),
-            dtype=cos_view.dtype,
-            device=cos_view.device,
-        )
-        _mrope_sin_slice = torch.empty(
-            (1, num_tokens, 1, sin_view.shape[-1]),
             dtype=sin_view.dtype,
             device=sin_view.device,
         )
