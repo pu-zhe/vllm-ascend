@@ -34,6 +34,22 @@ _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
 
 
+def _rotate_half_torch(x: torch.Tensor) -> torch.Tensor:
+    half = x.shape[-1] // 2
+    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+
+def _apply_rotary_half_torch(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    query = (query * cos) + (_rotate_half_torch(query) * sin)
+    key = (key * cos) + (_rotate_half_torch(key) * sin)
+    return query, key
+
+
 def merge_mrope_cos_sin_for_apply(
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -213,16 +229,18 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
             k_pass = key[..., self.rotary_dim :]
             q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
+            if self.rotary_dim == 64:
+                q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
+            else:
+                q_rot, k_rot = _apply_rotary_half_torch(q_rot, k_rot, cos, sin)
             q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
             query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
             key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-            return query, key
         else:
             query = query.contiguous().view(1, num_tokens, -1, self.head_size)
             key = key.contiguous().view(1, num_tokens, -1, self.head_size)
-            query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
+            query, key = _apply_rotary_half_torch(query, key, cos, sin)
 
         return query.view(query_shape), key.view(key_shape)
 
