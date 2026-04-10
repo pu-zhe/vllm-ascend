@@ -101,8 +101,7 @@ def set_mrope_apply_rotary_slices(
     sin_view = sin.contiguous().view(1, num_tokens, 1, -1)
 
     # Keep stable storage across forwards for graph replay.
-    need_alloc = _mrope_cos_slice is None or _mrope_sin_slice is None
-    if need_alloc:
+    if _mrope_cos_slice is None or _mrope_sin_slice is None:
         capacity = capacity_tokens if capacity_tokens is not None else num_tokens
         if capacity < num_tokens:
             capacity = num_tokens
