@@ -37,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
+from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
+from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
@@ -172,8 +174,6 @@ class NPUModelRunner310(NPUModelRunner):
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         with temporary_context:
-            if self.uses_mrope:
-                begin_mrope_forward_310()
             return super()._dummy_run(
                 num_tokens=num_tokens,
                 with_prefill=with_prefill,
@@ -190,10 +190,26 @@ class NPUModelRunner310(NPUModelRunner):
                 profile_seq_lens=profile_seq_lens,
             )
 
-    def execute_model(self, *args, **kwargs):
+    def _model_forward(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs,
+    ):
         if self.uses_mrope:
-            begin_mrope_forward_310()
-        return super().execute_model(*args, **kwargs)
+            assert positions is not None
+            prepare_mrope_cos_sin_slices_from_runner(self, positions)
+        return super()._model_forward(
+            num_tokens_padded,
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
 
     def _check_and_update_cudagraph_mode(
         self,
