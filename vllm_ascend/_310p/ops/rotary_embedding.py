@@ -52,33 +52,28 @@ def merge_mrope_cos_sin_for_apply(
 
 
 def set_mrope_apply_rotary_slices(
-    emb: AscendMRotaryEmbedding,
+    cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
-    target_dtype: torch.dtype,
-    target_device: torch.device,
     *,
+    mrope_section: list[int] | None = None,
+    mrope_interleaved: bool = False,
     capacity_tokens: int | None = None,
 ) -> None:
     """Build cos/sin views for `npu_apply_rotary_pos_emb` from positions; must run once per forward before layers."""
     global _mrope_cos_slice
     global _mrope_sin_slice
 
-    assert emb.mrope_section is not None
-    if emb.cos_sin_cache.device != target_device:
-        emb.cos_sin_cache = emb.cos_sin_cache.to(target_device)
-    if emb.cos_sin_cache.dtype != target_dtype:
-        emb.cos_sin_cache = emb.cos_sin_cache.to(target_dtype)
-
     assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
-    cos_sin = emb.cos_sin_cache[positions]
+    cos_sin = cos_sin_cache[positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
     if positions.ndim == 2:
         assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
+        assert mrope_section is not None
         cos, sin = merge_mrope_cos_sin_for_apply(
             cos,
             sin,
-            list(emb.mrope_section),
-            emb.mrope_interleaved,
+            list(mrope_section),
+            mrope_interleaved,
         )
     # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
     # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
@@ -136,20 +131,12 @@ def set_mrope_apply_rotary_slices(
 
 def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tensor) -> None:
     """Resolve MRoPE embedding from the runner and populate `_mrope_cos_slice` / `_mrope_sin_slice`."""
-    emb = getattr(runner, "_cached_mrope_emb310", None)
-    if emb is None:
-        for module in runner.model.modules():
-            if isinstance(module, AscendMRotaryEmbedding310):
-                emb = module
-                runner._cached_mrope_emb310 = emb
-                break
-    if emb is None:
-        raise RuntimeError("uses_mrope is True but no AscendMRotaryEmbedding310 was found in the model.")
+    emb = next(module for module in runner.model.modules() if isinstance(module, AscendMRotaryEmbedding310))
     set_mrope_apply_rotary_slices(
-        emb,
+        emb.cos_sin_cache,
         positions,
-        runner.dtype,
-        runner.device,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
         capacity_tokens=runner.max_num_tokens,
     )
 
