@@ -37,7 +37,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
-from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
