@@ -217,16 +217,6 @@ def _rope_forward_oot(
 
 
 class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
-    def _get_mrope_cos_sin_for_apply(self, num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
-        global _mrope_cos_slice
-        global _mrope_sin_slice
-        if _mrope_cos_slice is None or _mrope_sin_slice is None:
-            raise RuntimeError(
-                "MRoPE cos/sin slices are not prepared. "
-                "Expected NPUModelRunner310._model_forward after positions are ready for each forward."
-            )
-        return _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
-
     def forward_oot(
         self,
         positions: torch.Tensor,
@@ -244,7 +234,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         # switching rotary kernel mode.
         rotary_mode = "half"
         num_tokens = query.shape[0]
-        cos, sin = self._get_mrope_cos_sin_for_apply(num_tokens)
+        cos, sin = _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
 
         # Keep branch layout aligned with rope implementation for better numerical consistency.
         if self.head_size == 128 and self.rotary_dim == self.head_size:
@@ -258,13 +248,8 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
             q_pass = query[..., self.rotary_dim :]
             k_rot = key[..., : self.rotary_dim]
             k_pass = key[..., self.rotary_dim :]
-            if self.rotary_dim == 64:
-                q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-                k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-            else:
-                # Keep separate branch for non-64 partial rotary to match rope control flow.
-                q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-                k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
+            q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
+            k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
             q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)

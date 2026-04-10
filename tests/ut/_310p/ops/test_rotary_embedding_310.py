@@ -13,7 +13,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import pytest
 import torch
 
 from vllm_ascend._310p.ops import rotary_embedding as rotary_310
@@ -76,18 +75,3 @@ def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     assert first_ptr == second_ptr
 
 
-def test_get_mrope_cos_sin_for_apply_raises_when_unprepared():
-    _reset_mrope_globals()
-    emb = _build_mrope_embedding()
-    with pytest.raises(RuntimeError, match="not prepared"):
-        emb._get_mrope_cos_sin_for_apply(num_tokens=4)
-
-
-def test_get_mrope_cos_sin_for_apply_after_prepare():
-    _reset_mrope_globals()
-    emb = _build_mrope_embedding()
-    positions = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
-    set_mrope_apply_rotary_slices(emb, positions, torch.float32, torch.device("cpu"))
-    cos, sin = emb._get_mrope_cos_sin_for_apply(num_tokens=4)
-    assert cos.data_ptr() == rotary_310._mrope_cos_slice.data_ptr()
-    assert sin.data_ptr() == rotary_310._mrope_sin_slice.data_ptr()
