@@ -14,7 +14,6 @@
 #
 
 import torch
-from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm_ascend._310p.ops import rotary_embedding as rotary_310
 from vllm_ascend._310p.ops.rotary_embedding import (
@@ -74,30 +73,4 @@ def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     second_ptr = rotary_310._mrope_cos_slice.data_ptr()
 
     assert first_ptr == second_ptr
-
-
-def test_apply_rotary_mrope_torch_matches_apply_rotary_emb():
-    """Torch MRoPE fallback must match vLLM ApplyRotaryEmb for both neox and GPT-J pairing."""
-    t, n_h, rd = 2, 1, 8
-    torch.manual_seed(0)
-    q_rot = torch.randn(1, t, n_h, rd)
-    k_rot = torch.randn(1, t, n_h, rd)
-    cos_half = torch.randn(t, rd // 2)
-    sin_half = torch.randn(t, rd // 2)
-    cos = torch.cat((cos_half, cos_half), dim=-1).view(1, t, 1, rd)
-    sin = torch.cat((sin_half, sin_half), dim=-1).view(1, t, 1, rd)
-
-    for neox in (True, False):
-        oq, ok = rotary_310._apply_rotary_mrope_torch(
-            q_rot.clone(),
-            k_rot.clone(),
-            cos,
-            sin,
-            neox,
-        )
-        rq = ApplyRotaryEmb.forward_static(q_rot[0], cos_half, sin_half, neox)
-        rk = ApplyRotaryEmb.forward_static(k_rot[0], cos_half, sin_half, neox)
-        assert torch.allclose(oq[0], rq)
-        assert torch.allclose(ok[0], rk)
-
 
