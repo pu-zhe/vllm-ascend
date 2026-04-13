@@ -35,17 +35,6 @@ _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
 
 
-def _mrope_cos_sin_half_for_apply_emb(
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Strip duplicated half from MRoPE buffers; shapes match ApplyRotaryEmb (per-token half-dim)."""
-    half = cos.shape[-1] // 2
-    cos_h = cos[0, :, 0, :half].contiguous()
-    sin_h = sin[0, :, 0, :half].contiguous()
-    return cos_h, sin_h
-
-
 def _apply_rotary_mrope_torch(
     q_rot: torch.Tensor,
     k_rot: torch.Tensor,
@@ -54,7 +43,9 @@ def _apply_rotary_mrope_torch(
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """PyTorch path aligned with vLLM MRotaryEmbedding.forward_native -> ApplyRotaryEmb."""
-    cos_h, sin_h = _mrope_cos_sin_half_for_apply_emb(cos, sin)
+    half = cos.shape[-1] // 2
+    cos_h = cos[0, :, 0, :half].contiguous()
+    sin_h = sin[0, :, 0, :half].contiguous()
     q_out = ApplyRotaryEmb.forward_static(q_rot[0], cos_h, sin_h, is_neox_style)
     k_out = ApplyRotaryEmb.forward_static(k_rot[0], cos_h, sin_h, is_neox_style)
     return q_out.unsqueeze(0), k_out.unsqueeze(0)
