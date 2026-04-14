@@ -15,8 +15,10 @@
 # limitations under the License.
 #
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
@@ -31,6 +33,9 @@ from vllm_ascend.utils import maybe_trans_nz
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
+
+QWEN35MOE_FIRST_CALL_DUMP = False
+QWEN35MOE_SHARED_EXPERTS_DUMPED = False
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -286,4 +291,21 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         if self._shared_experts is None:
             return routed_out
         shared_out = self._forward_shared_experts(hidden_states)
+        global QWEN35MOE_SHARED_EXPERTS_DUMPED
+        if (
+            "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
+            and QWEN35MOE_FIRST_CALL_DUMP
+            and not QWEN35MOE_SHARED_EXPERTS_DUMPED
+        ):
+            QWEN35MOE_SHARED_EXPERTS_DUMPED = True
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "input": hidden_states.detach().cpu(),
+                    "output": shared_out.detach().cpu(),
+                },
+                dump_dir / "qwen35moe_shared_experts.pt",
+            )
         return shared_out, routed_out

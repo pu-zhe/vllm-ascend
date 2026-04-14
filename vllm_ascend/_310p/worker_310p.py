@@ -20,6 +20,8 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import memory_profiling
 
+import vllm_ascend._310p.fused_moe.fused_moe as fused_moe_310
+import vllm_ascend.patch.worker.patch_qwen3_5_310 as patch_qwen3_5_310
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
@@ -107,3 +109,11 @@ class NPUWorker310(NPUWorker):
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
         logger.info("Skip warm-up atb ops for 310P device.")
+
+    def compile_or_warm_up_model(self) -> float:
+        compilation_time = super().compile_or_warm_up_model()
+        fused_moe_310.QWEN35MOE_FIRST_CALL_DUMP = True
+        fused_moe_310.QWEN35MOE_SHARED_EXPERTS_DUMPED = False
+        patch_qwen3_5_310.QWEN35MOE_FIRST_CALL_DUMP = True
+        patch_qwen3_5_310.QWEN35MOE_RECURRENT_GDR_DUMPED = False
+        return compilation_time

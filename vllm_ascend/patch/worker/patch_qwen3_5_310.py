@@ -17,8 +17,11 @@
 # mypy: ignore-errors
 
 
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -29,6 +32,9 @@ from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_r
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
+
+QWEN35MOE_FIRST_CALL_DUMP = False
+QWEN35MOE_RECURRENT_GDR_DUMPED = False
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -66,6 +72,22 @@ def npu_recurrent_gated_delta_rule_310(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
+    global QWEN35MOE_RECURRENT_GDR_DUMPED
+    dump_payload = None
+    if QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED:
+        QWEN35MOE_RECURRENT_GDR_DUMPED = True
+        dump_payload = {
+            "q": q.detach().cpu(),
+            "k": k.detach().cpu(),
+            "v": v.detach().cpu(),
+            "g": None if g is None else g.detach().cpu(),
+            "beta": beta.detach().cpu(),
+            "state_in": state.detach().cpu(),
+            "cu_seqlens": cu_seqlens.detach().cpu(),
+            "ssm_state_indices": ssm_state_indices.detach().cpu(),
+            "num_accepted_tokens": None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu(),
+        }
+
     if use_qk_l2norm_in_kernel:
         q = _l2norm(q)
         k = _l2norm(k)
@@ -90,6 +112,13 @@ def npu_recurrent_gated_delta_rule_310(
         num_accepted_tokens=accepted_tokens,
         scale_value=k.shape[-1] ** -0.5,
     ).unsqueeze(0)
+    if dump_payload is not None:
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        dump_payload["out"] = out.detach().cpu()
+        dump_payload["state_out"] = state.detach().cpu()
+        torch.save(dump_payload, dump_dir / "qwen35moe_recurrent_gdr.pt")
     return out
 
 
