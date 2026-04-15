@@ -302,11 +302,16 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
             rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
             dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
             dump_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                {
-                    "input": hidden_states[:DUMP_TOKEN_NUM].detach().cpu(),
-                    "output": shared_out[:DUMP_TOKEN_NUM].detach().cpu(),
-                },
-                dump_dir / "qwen35moe_shared_experts.pt",
-            )
+            token_num = min(DUMP_TOKEN_NUM, hidden_states.shape[0])
+            hidden_states_cpu = hidden_states.detach().cpu()
+            shared_out_cpu = shared_out.detach().cpu()
+            for token_idx in range(token_num):
+                torch.save(
+                    {
+                        "token_idx": token_idx,
+                        "input": hidden_states_cpu[token_idx : token_idx + 1],
+                        "output": shared_out_cpu[token_idx : token_idx + 1],
+                    },
+                    dump_dir / f"qwen35moe_shared_experts_token{token_idx}.pt",
+                )
         return shared_out, routed_out

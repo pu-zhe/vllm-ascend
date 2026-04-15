@@ -74,20 +74,8 @@ def npu_recurrent_gated_delta_rule_310(
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
     global QWEN35MOE_RECURRENT_GDR_DUMPED
-    dump_payload = None
-    if QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED:
-        QWEN35MOE_RECURRENT_GDR_DUMPED = True
-        dump_payload = {
-            "q": q[:, :DUMP_TOKEN_NUM].detach().cpu(),
-            "k": k[:, :DUMP_TOKEN_NUM].detach().cpu(),
-            "v": v[:, :DUMP_TOKEN_NUM].detach().cpu(),
-            "g": None if g is None else g[:, :DUMP_TOKEN_NUM].detach().cpu(),
-            "beta": beta[:, :DUMP_TOKEN_NUM].detach().cpu(),
-            "state_in": state[:DUMP_TOKEN_NUM].detach().cpu(),
-            "cu_seqlens": cu_seqlens.detach().cpu(),
-            "ssm_state_indices": ssm_state_indices[:DUMP_TOKEN_NUM].detach().cpu(),
-            "num_accepted_tokens": None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu(),
-        }
+    need_dump = QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED
+    state_in = state.detach().cpu() if need_dump else None
 
     if use_qk_l2norm_in_kernel:
         q = _l2norm(q)
@@ -113,13 +101,40 @@ def npu_recurrent_gated_delta_rule_310(
         num_accepted_tokens=accepted_tokens,
         scale_value=k.shape[-1] ** -0.5,
     ).unsqueeze(0)
-    if dump_payload is not None:
+    if need_dump:
+        QWEN35MOE_RECURRENT_GDR_DUMPED = True
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
         dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
         dump_dir.mkdir(parents=True, exist_ok=True)
-        dump_payload["out"] = out[:, :DUMP_TOKEN_NUM].detach().cpu()
-        dump_payload["state_out"] = state[:DUMP_TOKEN_NUM].detach().cpu()
-        torch.save(dump_payload, dump_dir / "qwen35moe_recurrent_gdr.pt")
+        token_num = min(DUMP_TOKEN_NUM, q.shape[1])
+        state_out = state.detach().cpu()
+        q_cpu = q.detach().cpu()
+        k_cpu = k.detach().cpu()
+        v_cpu = v.detach().cpu()
+        g_cpu = None if g is None else g.detach().cpu()
+        beta_cpu = beta.detach().cpu()
+        out_cpu = out.detach().cpu()
+        ssm_state_indices_cpu = ssm_state_indices.detach().cpu()
+        cu_seqlens_cpu = cu_seqlens.detach().cpu()
+        num_accepted_tokens_cpu = None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu()
+        for token_idx in range(token_num):
+            torch.save(
+                {
+                    "token_idx": token_idx,
+                    "q": q_cpu[:, token_idx : token_idx + 1],
+                    "k": k_cpu[:, token_idx : token_idx + 1],
+                    "v": v_cpu[:, token_idx : token_idx + 1],
+                    "g": None if g_cpu is None else g_cpu[:, token_idx : token_idx + 1],
+                    "beta": beta_cpu[:, token_idx : token_idx + 1],
+                    "out": out_cpu[:, token_idx : token_idx + 1],
+                    "state_in": state_in[token_idx : token_idx + 1],
+                    "state_out": state_out[token_idx : token_idx + 1],
+                    "ssm_state_indices": ssm_state_indices_cpu[token_idx : token_idx + 1],
+                    "cu_seqlens": cu_seqlens_cpu,
+                    "num_accepted_tokens": num_accepted_tokens_cpu,
+                },
+                dump_dir / f"qwen35moe_recurrent_gdr_token{token_idx}.pt",
+            )
     return out
 
 
