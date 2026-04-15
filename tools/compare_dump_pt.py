@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 
 def parse_args():
@@ -100,9 +101,14 @@ def compare_tensor(left_tensor: torch.Tensor, right_tensor: torch.Tensor, name: 
     max_abs = diff.max().item() if diff.numel() > 0 else 0.0
     mean_abs = diff.mean().item() if diff.numel() > 0 else 0.0
     same = torch.allclose(left_tensor, right_tensor, rtol=rtol, atol=atol)
+    cosine = (
+        F.cosine_similarity(left_tensor.flatten().unsqueeze(0), right_tensor.flatten().unsqueeze(0)).item()
+        if diff.numel() > 0
+        else 1.0
+    )
     print(
         f"{name}: shape={tuple(left_tensor.shape)} "
-        f"allclose={same} max_abs={max_abs:.6g} mean_abs={mean_abs:.6g}"
+        f"allclose={same} max_abs={max_abs:.6g} mean_abs={mean_abs:.6g} cosine={cosine:.6g}"
     )
 
 
