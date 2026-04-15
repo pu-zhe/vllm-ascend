@@ -34,8 +34,8 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
 
 QWEN35MOE_FIRST_CALL_DUMP = False
-QWEN35MOE_RECURRENT_GDR_DUMPED = False
 DUMP_TOKEN_NUM = 10
+QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN = 1
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -61,6 +61,67 @@ def _flatten_state_indices(
     return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
 
 
+def _dump_recurrent_gdr_tokens(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    beta: torch.Tensor,
+    out: torch.Tensor,
+    state_in: torch.Tensor,
+    state_out: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+):
+    global QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN
+
+    if not QWEN35MOE_FIRST_CALL_DUMP or QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN >= DUMP_TOKEN_NUM:
+        return
+
+    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+
+    q_cpu = q.detach().cpu()
+    k_cpu = k.detach().cpu()
+    v_cpu = v.detach().cpu()
+    g_cpu = None if g is None else g.detach().cpu()
+    beta_cpu = beta.detach().cpu()
+    out_cpu = out.detach().cpu()
+    state_in_cpu = state_in.detach().cpu()
+    state_out_cpu = state_out.detach().cpu()
+    ssm_state_indices_cpu = ssm_state_indices.detach().cpu()
+    cu_seqlens_cpu = cu_seqlens.detach().cpu()
+    num_accepted_tokens_cpu = None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu()
+
+    token_num = q_cpu.shape[1]
+    start_idx = 1 if QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN == 1 and token_num > 1 else 0
+
+    for local_token_idx in range(start_idx, token_num):
+        dump_token_idx = QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN
+        if dump_token_idx >= DUMP_TOKEN_NUM:
+            break
+        torch.save(
+            {
+                "token_idx": dump_token_idx,
+                "q": q_cpu[:, local_token_idx : local_token_idx + 1],
+                "k": k_cpu[:, local_token_idx : local_token_idx + 1],
+                "v": v_cpu[:, local_token_idx : local_token_idx + 1],
+                "g": None if g_cpu is None else g_cpu[:, local_token_idx : local_token_idx + 1],
+                "beta": beta_cpu[:, local_token_idx : local_token_idx + 1],
+                "out": out_cpu[:, local_token_idx : local_token_idx + 1],
+                "state_in": state_in_cpu,
+                "state_out": state_out_cpu,
+                "ssm_state_indices": ssm_state_indices_cpu,
+                "cu_seqlens": cu_seqlens_cpu,
+                "num_accepted_tokens": num_accepted_tokens_cpu,
+            },
+            dump_dir / f"qwen35moe_recurrent_gdr_token{dump_token_idx}.pt",
+        )
+        QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN += 1
+
+
 def npu_recurrent_gated_delta_rule_310(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -73,9 +134,8 @@ def npu_recurrent_gated_delta_rule_310(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
-    global QWEN35MOE_RECURRENT_GDR_DUMPED
-    need_dump = QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED
-    state_in = state.detach().cpu() if need_dump else None
+    need_dump = QWEN35MOE_FIRST_CALL_DUMP and QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN < DUMP_TOKEN_NUM
+    state_in = state if need_dump else None
 
     if use_qk_l2norm_in_kernel:
         q = _l2norm(q)
@@ -102,39 +162,19 @@ def npu_recurrent_gated_delta_rule_310(
         scale_value=k.shape[-1] ** -0.5,
     ).unsqueeze(0)
     if need_dump:
-        QWEN35MOE_RECURRENT_GDR_DUMPED = True
-        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-        dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        token_num = min(DUMP_TOKEN_NUM, q.shape[1])
-        state_out = state.detach().cpu()
-        q_cpu = q.detach().cpu()
-        k_cpu = k.detach().cpu()
-        v_cpu = v.detach().cpu()
-        g_cpu = None if g is None else g.detach().cpu()
-        beta_cpu = beta.detach().cpu()
-        out_cpu = out.detach().cpu()
-        ssm_state_indices_cpu = ssm_state_indices.detach().cpu()
-        cu_seqlens_cpu = cu_seqlens.detach().cpu()
-        num_accepted_tokens_cpu = None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu()
-        for token_idx in range(token_num):
-            torch.save(
-                {
-                    "token_idx": token_idx,
-                    "q": q_cpu[:, token_idx : token_idx + 1],
-                    "k": k_cpu[:, token_idx : token_idx + 1],
-                    "v": v_cpu[:, token_idx : token_idx + 1],
-                    "g": None if g_cpu is None else g_cpu[:, token_idx : token_idx + 1],
-                    "beta": beta_cpu[:, token_idx : token_idx + 1],
-                    "out": out_cpu[:, token_idx : token_idx + 1],
-                    "state_in": state_in[token_idx : token_idx + 1],
-                    "state_out": state_out[token_idx : token_idx + 1],
-                    "ssm_state_indices": ssm_state_indices_cpu[token_idx : token_idx + 1],
-                    "cu_seqlens": cu_seqlens_cpu,
-                    "num_accepted_tokens": num_accepted_tokens_cpu,
-                },
-                dump_dir / f"qwen35moe_recurrent_gdr_token{token_idx}.pt",
-            )
+        _dump_recurrent_gdr_tokens(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            out=out,
+            state_in=state_in,
+            state_out=state,
+            ssm_state_indices=ssm_state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+        )
     return out
 
 
@@ -304,40 +344,19 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                if QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED:
-                    QWEN35MOE_RECURRENT_GDR_DUMPED = True
-                    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-                    dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
-                    dump_dir.mkdir(parents=True, exist_ok=True)
-                    token_num = min(DUMP_TOKEN_NUM, query_non_spec.shape[1])
-                    q_cpu = query_non_spec.detach().cpu()
-                    k_cpu = key_non_spec.detach().cpu()
-                    v_cpu = value_non_spec.detach().cpu()
-                    g_cpu = None if g_non_spec is None else g_non_spec.detach().cpu()
-                    beta_cpu = beta_non_spec.detach().cpu()
-                    out_cpu = core_attn_out_non_spec.detach().cpu()
-                    initial_state_cpu = initial_state.detach().cpu()
-                    last_recurrent_state_cpu = last_recurrent_state.detach().cpu()
-                    ssm_state_indices_cpu = non_spec_state_indices_tensor.detach().cpu()
-                    cu_seqlens_cpu = non_spec_query_start_loc.detach().cpu()
-                    for token_idx in range(token_num):
-                        torch.save(
-                            {
-                                "token_idx": token_idx,
-                                "q": q_cpu[:, token_idx : token_idx + 1],
-                                "k": k_cpu[:, token_idx : token_idx + 1],
-                                "v": v_cpu[:, token_idx : token_idx + 1],
-                                "g": None if g_cpu is None else g_cpu[:, token_idx : token_idx + 1],
-                                "beta": beta_cpu[:, token_idx : token_idx + 1],
-                                "out": out_cpu[:, token_idx : token_idx + 1],
-                                "state_in": initial_state_cpu,
-                                "state_out": last_recurrent_state_cpu,
-                                "ssm_state_indices": ssm_state_indices_cpu,
-                                "cu_seqlens": cu_seqlens_cpu,
-                                "num_accepted_tokens": None,
-                            },
-                            dump_dir / f"qwen35moe_recurrent_gdr_token{token_idx}.pt",
-                        )
+                _dump_recurrent_gdr_tokens(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    out=core_attn_out_non_spec,
+                    state_in=initial_state,
+                    state_out=last_recurrent_state,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    cu_seqlens=non_spec_query_start_loc,
+                    num_accepted_tokens=None,
+                )
 
                 # Init cache
                 ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)

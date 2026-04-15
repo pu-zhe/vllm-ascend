@@ -115,5 +115,5 @@ class NPUWorker310(NPUWorker):
         fused_moe_310.QWEN35MOE_FIRST_CALL_DUMP = True
         fused_moe_310.QWEN35MOE_SHARED_EXPERTS_DUMPED = False
         patch_qwen3_5_310.QWEN35MOE_FIRST_CALL_DUMP = True
-        patch_qwen3_5_310.QWEN35MOE_RECURRENT_GDR_DUMPED = False
+        patch_qwen3_5_310.QWEN35MOE_RECURRENT_GDR_NEXT_TOKEN = 1
         return compilation_time
