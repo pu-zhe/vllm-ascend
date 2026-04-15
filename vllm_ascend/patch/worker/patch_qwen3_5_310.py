@@ -35,6 +35,7 @@ from vllm_ascend.utils import enable_sp
 
 QWEN35MOE_FIRST_CALL_DUMP = False
 QWEN35MOE_RECURRENT_GDR_DUMPED = False
+DUMP_TOKEN_NUM = 10
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -77,14 +78,14 @@ def npu_recurrent_gated_delta_rule_310(
     if QWEN35MOE_FIRST_CALL_DUMP and not QWEN35MOE_RECURRENT_GDR_DUMPED:
         QWEN35MOE_RECURRENT_GDR_DUMPED = True
         dump_payload = {
-            "q": q.detach().cpu(),
-            "k": k.detach().cpu(),
-            "v": v.detach().cpu(),
-            "g": None if g is None else g.detach().cpu(),
-            "beta": beta.detach().cpu(),
-            "state_in": state.detach().cpu(),
+            "q": q[:, :DUMP_TOKEN_NUM].detach().cpu(),
+            "k": k[:, :DUMP_TOKEN_NUM].detach().cpu(),
+            "v": v[:, :DUMP_TOKEN_NUM].detach().cpu(),
+            "g": None if g is None else g[:, :DUMP_TOKEN_NUM].detach().cpu(),
+            "beta": beta[:, :DUMP_TOKEN_NUM].detach().cpu(),
+            "state_in": state[:DUMP_TOKEN_NUM].detach().cpu(),
             "cu_seqlens": cu_seqlens.detach().cpu(),
-            "ssm_state_indices": ssm_state_indices.detach().cpu(),
+            "ssm_state_indices": ssm_state_indices[:DUMP_TOKEN_NUM].detach().cpu(),
             "num_accepted_tokens": None if num_accepted_tokens is None else num_accepted_tokens.detach().cpu(),
         }
 
@@ -116,8 +117,8 @@ def npu_recurrent_gated_delta_rule_310(
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
         dump_dir = Path.cwd() / "qwen35moe_first_call_dump" / f"rank{rank}"
         dump_dir.mkdir(parents=True, exist_ok=True)
-        dump_payload["out"] = out.detach().cpu()
-        dump_payload["state_out"] = state.detach().cpu()
+        dump_payload["out"] = out[:, :DUMP_TOKEN_NUM].detach().cpu()
+        dump_payload["state_out"] = state[:DUMP_TOKEN_NUM].detach().cpu()
         torch.save(dump_payload, dump_dir / "qwen35moe_recurrent_gdr.pt")
     return out
 

@@ -36,6 +36,7 @@ from .moe_comm_method import AllGatherCommImpl310
 
 QWEN35MOE_FIRST_CALL_DUMP = False
 QWEN35MOE_SHARED_EXPERTS_DUMPED = False
+DUMP_TOKEN_NUM = 10
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -303,8 +304,8 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
             dump_dir.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
-                    "input": hidden_states.detach().cpu(),
-                    "output": shared_out.detach().cpu(),
+                    "input": hidden_states[:DUMP_TOKEN_NUM].detach().cpu(),
+                    "output": shared_out[:DUMP_TOKEN_NUM].detach().cpu(),
                 },
                 dump_dir / "qwen35moe_shared_experts.pt",
             )
