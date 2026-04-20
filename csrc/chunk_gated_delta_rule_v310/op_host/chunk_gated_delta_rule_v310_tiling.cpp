@@ -70,11 +70,6 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetShapeAttrsInfo()
         return ge::GRAPH_FAILED;
     }
 
-    if ((seqLen * numHead * 4) > (64*64*6*4)) {
-        OP_LOGE(context_->GetNodeName() , "The product of seqLen and numHead must be less than %d bytes.\n", 64*64*6*4);
-        return ge::GRAPH_FAILED;
-    }
-
     if (headDimQK != 128){
         OP_LOGE(context_->GetNodeName() , "The head dimension of query and key must be 128. \n");
         return ge::GRAPH_FAILED;

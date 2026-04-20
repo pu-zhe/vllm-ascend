@@ -157,8 +157,8 @@ def golden_chunk_gated_delta_rule(
     return final_cor_attn_out, last_recurrent_state
 
 
-@pytest.mark.parametrize("batch_size", [1,4,8,16])
-@pytest.mark.parametrize("seqlen", [8, 31, 129, 512, 763])
+@pytest.mark.parametrize("batch_size", [1, 4, 8, 16, 32])
+@pytest.mark.parametrize("seqlen", [8, 31, 129, 512, 763, 1024, 1373, 2048])
 @pytest.mark.parametrize("headnum", [(8, 16), (16, 32)])
 @pytest.mark.parametrize("headdim_k", [128])
 @pytest.mark.parametrize("headdim_v", [128])

@@ -1306,42 +1306,54 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
 
     for (int i = 0; i < batchSize; i++) {
         for (int j_index = 0; j_index < headGroupNum; j_index++) {
-            for (int k_index = 0; k_index < seqLenGroupNum; k_index++) {
-                if (k_index < fullBlockGroupNum) {
-                    int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * width;
-                    if (k_index == (fullBlockGroupNum - 1)) {
-                        if (blockTailSeqLen != 0) {
-                            Duplicate(ub_temp0[k_index * width * blockLen], (float)0, width * blockLen);
+            // UB tiling: ub_temp0/ub_temp8 each has 32768 floats => max repeats = 32768 / (width*blockLen) = 256
+            const int maxSeqTile = 256;
+            for (int k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
+                int k_tile = seqLenGroupNum - k_base;
+                if (k_tile > maxSeqTile) {
+                    k_tile = maxSeqTile;
+                }
+
+                // Load a tile of [k_base, k_base + k_tile) blocks into ub_temp0
+                for (int kk = 0; kk < k_tile; kk++) {
+                    int k_index = k_base + kk;
+                    if (k_index < fullBlockGroupNum) {
+                        int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * width;
+                        if (k_index == (fullBlockGroupNum - 1) && blockTailSeqLen != 0) {
+                            Duplicate(ub_temp0[kk * width * blockLen], (float)0, width * blockLen);
                             SetFlag<HardEvent::V_MTE2>(0);
                             WaitFlag<HardEvent::V_MTE2>(0);
-                            DataCopy<float>(ub_temp0[k_index * width * blockLen], gGlobal[src_index], repeatParams_in_tail);
+                            DataCopy<float>(ub_temp0[kk * width * blockLen], gGlobal[src_index], repeatParams_in_tail);
                         } else {
-                            DataCopy<float>(ub_temp0[k_index * width * blockLen], gGlobal[src_index], repeatParams_in);
+                            DataCopy<float>(ub_temp0[kk * width * blockLen], gGlobal[src_index], repeatParams_in);
                         }
                     } else {
-                        DataCopy<float>(ub_temp0[k_index * width * blockLen], gGlobal[src_index], repeatParams_in);
+                        Duplicate(ub_temp0[kk * width * blockLen], (float)0, width * blockLen);
                     }
-
-                } else {
-                    Duplicate(ub_temp0[k_index * width * blockLen], (float)0, blockLen * blockLen);
                 }
+
+                SetFlag<HardEvent::MTE2_V>(0);
+                WaitFlag<HardEvent::MTE2_V>(0);
+
+                TransDataTo5HDParams transDataParamsTile = transDataParams;
+                transDataParamsTile.repeatTimes = k_tile;
+                TransDataTo5HD<float>(dstLocalList, srcLocalList, transDataParamsTile);
+
+                SetFlag<HardEvent::V_MTE3>(0);
+                WaitFlag<HardEvent::V_MTE3>(0);
+
+                // Store the tile from ub_temp8 back to GM
+                for (int kk = 0; kk < k_tile; kk++) {
+                    int k_index = k_base + kk;
+                    int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * width + k_index * blockLen;
+                    DataCopy<float>(gtransGlobal[dst_index], ub_temp8[kk * width * blockLen], repeatParams_out);
+                }
+
+                SetFlag<HardEvent::MTE3_V>(0);
+                WaitFlag<HardEvent::MTE3_V>(0);
+                SetFlag<HardEvent::MTE3_MTE2>(0);
+                WaitFlag<HardEvent::MTE3_MTE2>(0);
             }
-            SetFlag<HardEvent::MTE2_V>(0);
-            WaitFlag<HardEvent::MTE2_V>(0);
-
-            TransDataTo5HD<float>(dstLocalList, srcLocalList, transDataParams);
-
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-
-            for (int k_index = 0; k_index < seqLenGroupNum; k_index++) {
-                int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * width + k_index * blockLen;
-                DataCopy<float>(gtransGlobal[dst_index], ub_temp8[k_index * width * blockLen], repeatParams_out);
-            }
-            SetFlag<HardEvent::MTE3_V>(0);
-            WaitFlag<HardEvent::MTE3_V>(0);
-            SetFlag<HardEvent::MTE3_MTE2>(0);
-            WaitFlag<HardEvent::MTE3_MTE2>(0);
         }
     }
 }
@@ -1382,55 +1394,67 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
     LocalTensor<half> ub_temp_half_1 = ub_temp0.ReinterpretCast<half>();
     LocalTensor<half> ub_temp_half_2 = ub_temp8.ReinterpretCast<half>();
 
-    uint64_t dstLocalList[16];
-    for (int b = 0; b < 16; b++) {
-        dstLocalList[b] = (uint64_t)(ub_temp_half_2[blockLen * b].GetPhyAddr());
-    }
-    uint64_t srcLocalList[16];
-    for (int b = 0; b < 16; b++) {
-        srcLocalList[b] = (uint64_t)(ub_temp_half_1[blockLen * b].GetPhyAddr());
-    }
-
     for (int i = 0; i < batchSize; i++) {
-        for (int r = 0; r < (headGroupNum * seqLenGroupNum); r++) {
-            int j_index = r / seqLenGroupNum;
-            int k_index = r % seqLenGroupNum;
-            if (k_index < fullBlockGroupNum) {
-                int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * blockLen;
-                if (k_index == (fullBlockGroupNum - 1)) {
-                    if (blockTailSeqLen != 0) {
-                        Duplicate(ub_temp_half_1[r * blockLen * blockLen], (half)0, blockLen * blockLen);
-                        SetFlag<HardEvent::V_MTE2>(0);
-                        WaitFlag<HardEvent::V_MTE2>(0);
-                        DataCopy<half>(ub_temp_half_1[r * blockLen * blockLen], bGlobal[src_index], repeatParams_in_tail);
-                    } else {
-                        DataCopy<half>(ub_temp_half_1[r * blockLen * blockLen], bGlobal[src_index], repeatParams_in);
-                    }
-                } else {
-                    DataCopy<half>(ub_temp_half_1[r * blockLen * blockLen], bGlobal[src_index], repeatParams_in);
+        // Tile over seqLenGroupNum for each head group to avoid UB overflow.
+        // One repeat is one 16x16 beta block (256 half). UB window (ub_temp_half_1/2) has 65536 half.
+        // Max repeats per tile: 65536 / 256 = 256.
+        const int maxSeqTile = 256;
+
+        uint64_t dstLocalList[16];
+        uint64_t srcLocalList[16];
+        for (int b = 0; b < 16; b++) {
+            srcLocalList[b] = (uint64_t)(ub_temp_half_1[blockLen * b].GetPhyAddr());
+            dstLocalList[b] = (uint64_t)(ub_temp_half_2[blockLen * b].GetPhyAddr());
+        }
+
+        for (int j_index = 0; j_index < headGroupNum; j_index++) {
+            for (int k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
+                int k_tile = seqLenGroupNum - k_base;
+                if (k_tile > maxSeqTile) {
+                    k_tile = maxSeqTile;
                 }
 
-            } else {
-                Duplicate(ub_temp_half_1[r * blockLen * blockLen], (half)0, blockLen * blockLen);
+                // Load k_tile blocks for this head group into UB
+                for (int kk = 0; kk < k_tile; kk++) {
+                    int k_index = k_base + kk;
+                    if (k_index < fullBlockGroupNum) {
+                        int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * blockLen;
+                        if (k_index == (fullBlockGroupNum - 1) && blockTailSeqLen != 0) {
+                            Duplicate(ub_temp_half_1[kk * blockLen * blockLen], (half)0, blockLen * blockLen);
+                            SetFlag<HardEvent::V_MTE2>(0);
+                            WaitFlag<HardEvent::V_MTE2>(0);
+                            DataCopy<half>(ub_temp_half_1[kk * blockLen * blockLen], bGlobal[src_index], repeatParams_in_tail);
+                        } else {
+                            DataCopy<half>(ub_temp_half_1[kk * blockLen * blockLen], bGlobal[src_index], repeatParams_in);
+                        }
+                    } else {
+                        Duplicate(ub_temp_half_1[kk * blockLen * blockLen], (half)0, blockLen * blockLen);
+                    }
+                }
+
+                SetFlag<HardEvent::MTE2_V>(0);
+                WaitFlag<HardEvent::MTE2_V>(0);
+
+                TransDataTo5HDParams transDataParamsTile = transDataParams;
+                transDataParamsTile.repeatTimes = k_tile;
+                TransDataTo5HD<half>(dstLocalList, srcLocalList, transDataParamsTile);
+
+                SetFlag<HardEvent::V_MTE3>(0);
+                WaitFlag<HardEvent::V_MTE3>(0);
+
+                // Store k_tile blocks back to GM
+                for (int kk = 0; kk < k_tile; kk++) {
+                    int k_index = k_base + kk;
+                    int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * blockLen + k_index * blockLen;
+                    DataCopy<half>(btransGlobal[dst_index], ub_temp_half_2[kk * blockLen * blockLen], repeatParams_out);
+                }
+
+                SetFlag<HardEvent::MTE3_V>(0);
+                WaitFlag<HardEvent::MTE3_V>(0);
+                SetFlag<HardEvent::MTE3_MTE2>(0);
+                WaitFlag<HardEvent::MTE3_MTE2>(0);
             }
         }
-        SetFlag<HardEvent::MTE2_V>(0);
-        WaitFlag<HardEvent::MTE2_V>(0);
-        TransDataTo5HD<half>(dstLocalList, srcLocalList, transDataParams);
-
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-
-        for (int r = 0; r < (headGroupNum * seqLenGroupNum); r++) {
-            int j_index = r / seqLenGroupNum;
-            int k_index = r % seqLenGroupNum;
-            int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * blockLen + k_index * blockLen;
-            DataCopy<half>(btransGlobal[dst_index], ub_temp_half_2[r * blockLen * blockLen], repeatParams_out);
-        }
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
-        SetFlag<HardEvent::MTE3_MTE2>(0);
-        WaitFlag<HardEvent::MTE3_MTE2>(0);
     }
 }
 
