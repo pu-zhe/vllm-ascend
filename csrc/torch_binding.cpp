@@ -725,7 +725,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     "                                   Tensor key, "
     "                                   Tensor value, "
     "                                   Tensor g, "
-    "                                   Tensor beta) -> (Tensor out, Tensor final_state)");
+    "                                   Tensor beta, "
+    "                                   Tensor actual_seq_lengths) -> (Tensor out, Tensor final_state)");
     ops.impl("npu_chunk_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_chunk_gated_delta_rule_310);
     
     ops.def(

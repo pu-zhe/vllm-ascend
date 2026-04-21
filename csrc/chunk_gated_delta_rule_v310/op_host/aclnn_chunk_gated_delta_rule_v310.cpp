@@ -38,6 +38,7 @@ struct ChunkGatedDeltaRuleV310Params {
     const aclTensor *value{nullptr};
     const aclTensor *g{nullptr};
     const aclTensor *beta{nullptr};
+    const aclTensor *actualSeqLengths{nullptr};
     const aclTensor *out{nullptr};
     const aclTensor *finalState{nullptr};
 };
@@ -45,6 +46,7 @@ struct ChunkGatedDeltaRuleV310Params {
 static const std::initializer_list<op::DataType> QKV_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT16};
 static const std::initializer_list<op::DataType> G_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT};
 static const std::initializer_list<op::DataType> BETA_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT16};
+static const std::initializer_list<op::DataType> ASL_TYPE_SUPPORT_LIST = {op::DataType::DT_INT32};
 static const std::initializer_list<op::DataType> OUT_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT16};
 static const std::initializer_list<op::DataType> STATE_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT};
 
@@ -55,6 +57,7 @@ static inline bool CheckNotNull(const ChunkGatedDeltaRuleV310Params &params)
     OP_CHECK_NULL(params.value, return false);
     OP_CHECK_NULL(params.g, return false);
     OP_CHECK_NULL(params.beta, return false);
+    OP_CHECK_NULL(params.actualSeqLengths, return false);
     OP_CHECK_NULL(params.out, return false);
     OP_CHECK_NULL(params.finalState, return false);
 
@@ -68,6 +71,7 @@ static inline bool CheckDtypeValid(const ChunkGatedDeltaRuleV310Params &params)
     OP_CHECK_DTYPE_NOT_SUPPORT(params.value, QKV_TYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(params.g, G_TYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(params.beta, BETA_TYPE_SUPPORT_LIST, return false);
+    OP_CHECK_DTYPE_NOT_SUPPORT(params.actualSeqLengths, ASL_TYPE_SUPPORT_LIST, return false);
 
     OP_CHECK_DTYPE_NOT_SUPPORT(params.out, OUT_TYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(params.finalState, STATE_TYPE_SUPPORT_LIST, return false);
@@ -90,23 +94,25 @@ static aclnnStatus PreProcess(ChunkGatedDeltaRuleV310Params &params)
     params.value->SetOriginalShape(params.value->GetViewShape());
     params.g->SetOriginalShape(params.g->GetViewShape());
     params.beta->SetOriginalShape(params.beta->GetViewShape());
+    params.actualSeqLengths->SetOriginalShape(params.actualSeqLengths->GetViewShape());
 
     return ACLNN_SUCCESS;
 }
 } // namespace
 
 aclnnStatus aclnnChunkGatedDeltaRuleV310GetWorkspaceSize(const aclTensor *query, const aclTensor *key, const aclTensor *value,
-                                                         const aclTensor *g, const aclTensor *beta, const aclTensor *out, const aclTensor *finalState,
+                                                         const aclTensor *g, const aclTensor *beta, const aclTensor *actual_seq_lengths,
+                                                         const aclTensor *out, const aclTensor *finalState,
                                                          uint64_t *workspaceSize, aclOpExecutor **executor)
 {
     L2_DFX_PHASE_1(aclnnChunkGatedDeltaRuleV310,
-                   DFX_IN(query, key, value, g, beta),
+                   DFX_IN(query, key, value, g, beta, actual_seq_lengths),
                    DFX_OUT(out, finalState));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
-    ChunkGatedDeltaRuleV310Params params{query, key, value, g, beta, out, finalState};
+    ChunkGatedDeltaRuleV310Params params{query, key, value, g, beta, actual_seq_lengths, out, finalState};
     CHECK_RET(CheckNotNull(params), ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckParams(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
@@ -123,11 +129,12 @@ aclnnStatus aclnnChunkGatedDeltaRuleV310GetWorkspaceSize(const aclTensor *query,
     auto value_ = l0op::Contiguous(value, uniqueExecutor.get());
     auto g_ = l0op::Contiguous(g, uniqueExecutor.get());
     auto beta_ = l0op::Contiguous(beta, uniqueExecutor.get());
+    auto actual_seq_lengths_ = l0op::Contiguous(actual_seq_lengths, uniqueExecutor.get());
 
     auto out_ = l0op::Contiguous(out, uniqueExecutor.get());
     auto finalState_ = l0op::Contiguous(finalState, uniqueExecutor.get());
 
-    auto outRet = l0op::ChunkGatedDeltaRuleV310(query_, key_, value_, g_, beta_, uniqueExecutor.get());
+    auto outRet = l0op::ChunkGatedDeltaRuleV310(query_, key_, value_, g_, beta_, actual_seq_lengths_, uniqueExecutor.get());
     if (outRet[0] == nullptr) {
         return ACLNN_ERR_INNER_NULLPTR;
     }

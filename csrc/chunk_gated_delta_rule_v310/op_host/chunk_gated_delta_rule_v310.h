@@ -17,6 +17,7 @@
 namespace l0op {
 const std::array<const aclTensor *, 2>
 ChunkGatedDeltaRuleV310(const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *g, const aclTensor *beta,
+                        const aclTensor *actual_seq_lengths,
                         aclOpExecutor *executor);
 }
 #endif // PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_CHUNK_GATED_DELTA_RULE_V310

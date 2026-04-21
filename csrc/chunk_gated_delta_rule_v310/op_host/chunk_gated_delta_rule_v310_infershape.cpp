@@ -19,6 +19,7 @@ namespace ops {
 
 const size_t KEY_INDEX = 1;
 const size_t VALUE_INDEX = 2;
+const size_t ASL_INDEX = 5;
 const size_t STATE_DIM_NUM = 4;
 
 const size_t DIM_0 = 0;
@@ -28,11 +29,12 @@ const size_t DIM_3 = 3;
 
 static ge::graphStatus InferShapeChunkGatedDeltaRuleV310(InferShapeContext *context) {
     const gert::Shape *query_shape = context->GetInputShape(0);
-    uint32_t batchSize = query_shape->GetDim(0);
-    uint32_t numHead = query_shape->GetDim(2);
-    uint32_t headDimQK = query_shape->GetDim(3);
+    const gert::Shape *asl_shape = context->GetInputShape(ASL_INDEX);
+    uint32_t batchSize = asl_shape->GetDim(0);
+    uint32_t numHead = query_shape->GetDim(1);
+    uint32_t headDimQK = query_shape->GetDim(2);
     const gert::Shape *value_shape = context->GetInputShape(2);
-    uint32_t headDimV = value_shape->GetDim(3);
+    uint32_t headDimV = value_shape->GetDim(2);
     gert::Shape *core_attn = context->GetOutputShape(0);
     *core_attn = *value_shape;
     Shape *last_recurrent_state = context->GetOutputShape(1);
@@ -47,7 +49,7 @@ static ge::graphStatus InferShapeChunkGatedDeltaRuleV310(InferShapeContext *cont
 static ge::graphStatus InferDataTypeChunkGatedDeltaRuleV310(InferDataTypeContext *context) {
     const auto inputDataType = context->GetInputDataType(0);
     context->SetOutputDataType(0, inputDataType);
-    context->SetOutputDataType(0, ge::DataType::DT_FLOAT);
+    context->SetOutputDataType(1, ge::DataType::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }
 

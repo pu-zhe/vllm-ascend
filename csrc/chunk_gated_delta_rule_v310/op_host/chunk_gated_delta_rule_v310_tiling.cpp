@@ -55,15 +55,14 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetShapeAttrsInfo()
         OP_LOGE(context_->GetNodeName() , "query is null\n");
         return ge::GRAPH_FAILED;
     }
-    if (query_shape->GetStorageShape().GetDimNum() != 4) {
-        OP_LOGE(context_->GetNodeName() , "query dim is not 4\n");
+    if (query_shape->GetStorageShape().GetDimNum() != 3) {
+        OP_LOGE(context_->GetNodeName() , "query dim is not 3\n");
         return ge::GRAPH_FAILED;
     }
-    uint32_t batchSize = query_shape->GetStorageShape().GetDim(0);
-    uint32_t seqLen = query_shape->GetStorageShape().GetDim(1);
-    uint32_t numHead = query_shape->GetStorageShape().GetDim(2);
-    uint32_t headDimQK = query_shape->GetStorageShape().GetDim(3);
-    OP_LOGI(context_->GetNodeName() , "query shape is (%d, %d, %d, %d)\n", batchSize, seqLen, numHead, headDimQK);
+    uint32_t totalTokens = query_shape->GetStorageShape().GetDim(0);
+    uint32_t numHead = query_shape->GetStorageShape().GetDim(1);
+    uint32_t headDimQK = query_shape->GetStorageShape().GetDim(2);
+    OP_LOGI(context_->GetNodeName() , "query shape is (%d, %d, %d)\n", totalTokens, numHead, headDimQK);
 
     if (numHead % 16 != 0) {
         OP_LOGE(context_->GetNodeName() , "Number of head must be a multiple of 16.\n");
@@ -80,11 +79,13 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetShapeAttrsInfo()
         OP_LOGE(context_->GetNodeName() , "key is null\n");
         return ge::GRAPH_FAILED;
     }
-    if (key_shape->GetStorageShape().GetDimNum() != 4) {
-        OP_LOGE(context_->GetNodeName() , "key dim is not 4\n");
+    if (key_shape->GetStorageShape().GetDimNum() != 3) {
+        OP_LOGE(context_->GetNodeName() , "key dim is not 3\n");
         return ge::GRAPH_FAILED;
     }
-    if (batchSize != key_shape->GetStorageShape().GetDim(0) || seqLen != key_shape->GetStorageShape().GetDim(1) || numHead != key_shape->GetStorageShape().GetDim(2) || headDimQK != key_shape->GetStorageShape().GetDim(3)) {
+    if (totalTokens != key_shape->GetStorageShape().GetDim(0) ||
+        numHead != key_shape->GetStorageShape().GetDim(1) ||
+        headDimQK != key_shape->GetStorageShape().GetDim(2)) {
         OP_LOGE(context_->GetNodeName() , "key shape is illegal\n");
         return ge::GRAPH_FAILED;
     }
@@ -94,27 +95,29 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetShapeAttrsInfo()
         OP_LOGE(context_->GetNodeName() , "value is null\n");
         return ge::GRAPH_FAILED;
     }
-    if (value_shape->GetStorageShape().GetDimNum() != 4) {
-        OP_LOGE(context_->GetNodeName() , "value dim is not 4\n");
+    if (value_shape->GetStorageShape().GetDimNum() != 3) {
+        OP_LOGE(context_->GetNodeName() , "value dim is not 3\n");
         return ge::GRAPH_FAILED;
     }
-    if (batchSize != value_shape->GetStorageShape().GetDim(0) || seqLen != value_shape->GetStorageShape().GetDim(1) || numHead != value_shape->GetStorageShape().GetDim(2)) {
+    if (totalTokens != value_shape->GetStorageShape().GetDim(0) ||
+        numHead != value_shape->GetStorageShape().GetDim(1)) {
         OP_LOGE(context_->GetNodeName() , "value shape is illegal\n");
         return ge::GRAPH_FAILED;
     }
-    uint32_t headDimV = value_shape->GetStorageShape().GetDim(3);
-    OP_LOGI(context_->GetNodeName() , "value shape is (%d, %d, %d, %d)\n", batchSize, seqLen, numHead, headDimV);
+    uint32_t headDimV = value_shape->GetStorageShape().GetDim(2);
+    OP_LOGI(context_->GetNodeName() , "value shape is (%d, %d, %d)\n", totalTokens, numHead, headDimV);
 
     const gert::StorageShape *g_shape = context_->GetInputShape(3);
     if (g_shape == nullptr) {
         OP_LOGE(context_->GetNodeName() , "g is null\n");
         return ge::GRAPH_FAILED;
     }
-    if (g_shape->GetStorageShape().GetDimNum() != 3) {
-        OP_LOGE(context_->GetNodeName() , "g dim is not 3\n");
+    if (g_shape->GetStorageShape().GetDimNum() != 2) {
+        OP_LOGE(context_->GetNodeName() , "g dim is not 2\n");
         return ge::GRAPH_FAILED;
     }
-    if (batchSize != g_shape->GetStorageShape().GetDim(0) || seqLen != g_shape->GetStorageShape().GetDim(1) || numHead != g_shape->GetStorageShape().GetDim(2)) {
+    if (totalTokens != g_shape->GetStorageShape().GetDim(0) ||
+        numHead != g_shape->GetStorageShape().GetDim(1)) {
         OP_LOGE(context_->GetNodeName() , "g shape is illegal\n");
         return ge::GRAPH_FAILED;
     }
@@ -124,17 +127,29 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetShapeAttrsInfo()
         OP_LOGE(context_->GetNodeName() , "beta is null\n");
         return ge::GRAPH_FAILED;
     }
-    if (beta_shape->GetStorageShape().GetDimNum() != 3) {
-        OP_LOGE(context_->GetNodeName() , "beta dim is not 3\n");
+    if (beta_shape->GetStorageShape().GetDimNum() != 2) {
+        OP_LOGE(context_->GetNodeName() , "beta dim is not 2\n");
         return ge::GRAPH_FAILED;
     }
-    if (batchSize != beta_shape->GetStorageShape().GetDim(0) || seqLen != beta_shape->GetStorageShape().GetDim(1) || numHead != beta_shape->GetStorageShape().GetDim(2)) {
+    if (totalTokens != beta_shape->GetStorageShape().GetDim(0) ||
+        numHead != beta_shape->GetStorageShape().GetDim(1)) {
         OP_LOGE(context_->GetNodeName() , "beta shape is illegal\n");
         return ge::GRAPH_FAILED;
     }
 
+    const gert::StorageShape *asl_shape = context_->GetInputShape(5);
+    if (asl_shape == nullptr) {
+        OP_LOGE(context_->GetNodeName() , "actual_seq_lengths is null\n");
+        return ge::GRAPH_FAILED;
+    }
+    if (asl_shape->GetStorageShape().GetDimNum() != 1) {
+        OP_LOGE(context_->GetNodeName() , "actual_seq_lengths dim is not 1\n");
+        return ge::GRAPH_FAILED;
+    }
+    uint32_t batchSize = asl_shape->GetStorageShape().GetDim(0);
+
     tilingData_.batchSize = batchSize;
-    tilingData_.seqLen = seqLen;
+    tilingData_.seqLen = totalTokens;
     tilingData_.numHead = numHead;
     tilingData_.headDimQK = headDimQK;
     tilingData_.headDimV = headDimV;
@@ -236,7 +251,17 @@ ge::graphStatus ChunkGatedDeltaRuleV310Tiling::GetWorkspaceSize()
 {
     // 固定系统 workspace 大小（16 MB）
     constexpr uint32_t sysWorkspaceSize = 16777216;
-    uint32_t usrSize = 128 * 128 * 4 * 10;
+    // workspace layout (in bytes):
+    // - beta_trans: [total_padded, numHead] FP16
+    // - g_trans:    [total_padded, numHead] FP32
+    // - g_cumsum:   [total_padded, numHead] FP32
+    // total_padded upper bound: totalTokens + (chunkSize - 1) * batchSize (each batch pads up to 63)
+    constexpr uint32_t chunkSize = 64;
+    uint64_t totalTokens = tilingData_.seqLen;
+    uint64_t batchSize = tilingData_.batchSize;
+    uint64_t numHead = tilingData_.numHead;
+    uint64_t totalPaddedUpper = totalTokens + (chunkSize - 1) * batchSize;
+    uint64_t usrSize = totalPaddedUpper * numHead * (2ULL + 4ULL + 4ULL);
     workspaceSize_ = sysWorkspaceSize + usrSize;
     return ge::GRAPH_SUCCESS;
 }

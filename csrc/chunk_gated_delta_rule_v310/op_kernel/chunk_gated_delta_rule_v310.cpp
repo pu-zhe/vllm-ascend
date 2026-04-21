@@ -11,7 +11,8 @@ using namespace ChunkGatedDeltaRuleV310;
 class ChunkGatedDeltaRuleV310Kernel {
 public:
     __aicore__ inline ChunkGatedDeltaRuleV310Kernel(){};
-    __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR core_attn, GM_ADDR last_recurrent_state,
+    __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR actual_seq_lengths,
+                                GM_ADDR core_attn, GM_ADDR last_recurrent_state,
                                 GM_ADDR workspace, const ChunkGatedDeltaRuleTilingData &tilingIn, TPipe *pipeIn);
     __aicore__ inline void InitUB();
     __aicore__ inline void InitWorkSpace(GM_ADDR workspace);
@@ -19,8 +20,12 @@ public:
     __aicore__ inline void L2normDim128Float(LocalTensor<half> src, uint32_t head_num);
     __aicore__ inline void L2normDim128FloatTrans(LocalTensor<half> src, uint32_t head_num);
     __aicore__ inline void Transpose_64_128();
-    __aicore__ inline void TransposeBetaHalf();
-    __aicore__ inline void TransposeGFloat();
+    __aicore__ inline void TransposeBetaHalfVlen(LocalTensor<int32_t> asl_ub,
+                                                 LocalTensor<int32_t> prefix_actual,
+                                                 LocalTensor<int32_t> prefix_padded);
+    __aicore__ inline void TransposeGFloatVlen(LocalTensor<int32_t> asl_ub,
+                                               LocalTensor<int32_t> prefix_actual,
+                                               LocalTensor<int32_t> prefix_padded);
     template <bool Zero_Diag = false>
     __aicore__ inline void Inv_bisec16_opt(LocalTensor<float> dst, LocalTensor<float> src);
     template <bool Zero_Diag = false>
@@ -36,7 +41,8 @@ public:
     __aicore__ inline void HighPrecLoad_16x16x4_A(LocalTensor<half> dst, LocalTensor<half> src, int repeatTimes, int srcStride, int offset);
     __aicore__ inline void HighPrecLoad_16x16x4_B(LocalTensor<half> dst, LocalTensor<half> src, int repeatTimes, int srcStride, int offset);
 
-    __aicore__ inline void GCumsumFloat();
+    __aicore__ inline void GCumsumFloatVlen(LocalTensor<int32_t> asl_ub,
+                                            LocalTensor<int32_t> prefix_padded);
     __aicore__ inline void Process();
 
     __aicore__ inline void LoadQKVHalf(LocalTensor<half> dst, GlobalTensor<half> src, uint32_t head_dim, uint32_t block_count);
@@ -59,7 +65,7 @@ public:
     GlobalTensor<half> vGlobal;
     GlobalTensor<float> gGlobal;
     GlobalTensor<half> bGlobal;
-    GlobalTensor<float> isGlobal;
+    GlobalTensor<int32_t> aslGlobal;
 
     GlobalTensor<half> attnGlobal;
     GlobalTensor<float> lsGlobal;
@@ -96,16 +102,15 @@ public:
     LocalTensor<float> I2;
 
     uint32_t batchSize;
-    uint32_t seqLen;
+    uint32_t totalTokens;
     uint32_t numHead;
     uint32_t headDimQK;
     uint32_t headDimV;
-    uint32_t seqLenPaded;
     uint32_t chunkSize;
 
     float headDimQKfp32;
     uint32_t singleCoreNumHead;
-    uint32_t tailSeqLen;
+    // NOTE: variable per-batch seqLen; tail/seqLenPaded are computed inside Process()
 
     uint64_t inputPtr[16];
     uint64_t outputPtr[16];
@@ -114,7 +119,8 @@ public:
     uint64_t outputPtr2[16];
 };
 
-__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR core_attn, GM_ADDR last_recurrent_state,
+__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR actual_seq_lengths,
+                                                           GM_ADDR core_attn, GM_ADDR last_recurrent_state,
                                                            GM_ADDR workspace, const ChunkGatedDeltaRuleTilingData &tilingIn, TPipe *pipeIn) {
     pipe = pipeIn;
     block_id = GetBlockIdx();
@@ -123,24 +129,23 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Init(GM_ADDR query, GM_ADD
     tiling = &tilingIn;
 
     batchSize = tiling->batchSize;
-    seqLen = tiling->seqLen;
+    totalTokens = tiling->seqLen;
     numHead = tiling->numHead;
     headDimQK = tiling->headDimQK;
     headDimV = tiling->headDimV;
     chunkSize = 64;
     singleCoreNumHead = numHead / block_num;
-    tailSeqLen = seqLen % chunkSize;
-    seqLenPaded = ceil_div(seqLen, chunkSize) * chunkSize;
 
-    uint64_t sizeQK = batchSize * seqLen * numHead * headDimQK;
-    uint64_t sizeV = batchSize * seqLen * numHead * headDimV;
+    uint64_t sizeQK = static_cast<uint64_t>(totalTokens) * numHead * headDimQK;
+    uint64_t sizeV = static_cast<uint64_t>(totalTokens) * numHead * headDimV;
     qGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(query), sizeQK);
     kGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(key), sizeQK);
     vGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(value), sizeV);
-    uint64_t sizeGBeta = batchSize * seqLen * numHead;
+    uint64_t sizeGBeta = static_cast<uint64_t>(totalTokens) * numHead;
     gGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(g), sizeGBeta);
     bGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(beta), sizeGBeta);
-    uint64_t sizeState = batchSize * numHead * headDimQK * headDimV;
+    aslGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(actual_seq_lengths), batchSize);
+    uint64_t sizeState = static_cast<uint64_t>(batchSize) * numHead * headDimQK * headDimV;
     attnGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(core_attn), sizeV);
     lsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(last_recurrent_state), sizeState);
 
@@ -219,12 +224,14 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::InitUB() {
 }
 
 __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::InitWorkSpace(GM_ADDR workspace) {
+    // Workspace is sized using upper bound: totalTokens + 63 * batchSize.
+    uint64_t totalPaddedUpper = static_cast<uint64_t>(totalTokens) + 63ULL * static_cast<uint64_t>(batchSize);
     btransGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace),
-                                 batchSize * seqLenPaded * numHead);
-    gtransGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace) + batchSize * seqLenPaded * numHead,
-                                 batchSize * seqLenPaded * numHead);
-    gcumsumGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace) + batchSize * seqLenPaded * numHead * 2,
-                                  batchSize * seqLenPaded * numHead);
+                                 totalPaddedUpper * numHead);
+    gtransGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace) + totalPaddedUpper * numHead,
+                                 totalPaddedUpper * numHead);
+    gcumsumGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace) + totalPaddedUpper * numHead * 2,
+                                  totalPaddedUpper * numHead);
 }
 
 __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::LoadQKVHalf(LocalTensor<half> dst,
@@ -352,70 +359,89 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::L2normDim128FloatTrans(Loc
     Mul<float>(ub_temp6, ub_temp6, ub_temp1[64 * 16], 64, headDimQK, {1, 1, 1, 8, 8, 0});
 }
 
-__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::GCumsumFloat() {
+__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::GCumsumFloatVlen(LocalTensor<int32_t> asl_ub,
+                                                                       LocalTensor<int32_t> prefix_padded) {
+    // Compute inclusive cumsum per (batch, head, chunk) on gtransGlobal and store to gcumsumGlobal.
+    // Keep the original "transpose + block parallel scan" idea, but run it per-batch because seqLenPaded varies.
     LocalTensor<uint8_t> stackBuffer = ub_temp11.ReinterpretCast<uint8_t>();
 
-    uint32_t totalChunk = batchSize * numHead * (seqLenPaded / chunkSize);
-    uint32_t chunkBatch = 256;
-    uint32_t chunkRepeat = ceil_div(totalChunk, chunkBatch);
-    uint32_t chunkTail = totalChunk % chunkBatch;
-    uint32_t dataLength;
-    uint32_t ub_temp_size = 64 * 64 * 6;
-    uint32_t numChunk;
-    uint32_t g_index = 0;
-    for (int r = 0; r < chunkRepeat; r++) {
-        if ((r == (chunkRepeat - 1)) && (chunkTail != 0)) {
-            numChunk = chunkTail;
-        } else {
-            numChunk = chunkBatch;
+    // UB layout used here (float):
+    // - ub_temp0: input tile [numChunkTile, 64]
+    // - ub_temp6: transposed tile [64, numChunkTile]
+    // - ub_temp0[ub_temp_size ...]: working buffer for scan on transposed layout
+    constexpr uint32_t ub_temp_size = 64 * 64 * 6; // keep consistent with old implementation to avoid overlap
+
+    TransposeParamsExt transposeParamsIn;
+    transposeParamsIn.nSize = 1;
+    transposeParamsIn.hSize = 1;
+    transposeParamsIn.wSize = chunkSize;
+    transposeParamsIn.transposeType = TransposeType::TRANSPOSE_NCHW2NHWC;
+
+    TransposeParamsExt transposeParamsOut;
+    transposeParamsOut.nSize = 1;
+    transposeParamsOut.hSize = 1;
+    transposeParamsOut.transposeType = TransposeType::TRANSPOSE_NCHW2NHWC;
+
+    for (int bs = 0; bs < static_cast<int>(batchSize); bs++) {
+        int32_t seqLen = asl_ub.GetValue(bs);
+        if (seqLen <= 0) {
+            continue;
         }
-        dataLength = numChunk * chunkSize;
-        uint32_t dataLength = numChunk * chunkSize;
+        uint32_t seqLenU = static_cast<uint32_t>(seqLen);
+        uint32_t seqLenPaded = ceil_div(seqLenU, chunkSize) * chunkSize;
+        uint32_t numChunkTotal = seqLenPaded / chunkSize;
+        int32_t pad_base = prefix_padded.GetValue(bs);
 
-        TransposeParamsExt transposeParamsIn;
-        transposeParamsIn.nSize = 1;
-        transposeParamsIn.cSize = numChunk;
-        transposeParamsIn.hSize = 1;
-        transposeParamsIn.wSize = chunkSize;
-        transposeParamsIn.transposeType = TransposeType::TRANSPOSE_NCHW2NHWC;
+        // Tile numChunk to control UB footprint (same as old: max 256)
+        constexpr uint32_t chunkTileMax = 256;
+        for (uint32_t head = 0; head < numHead; head++) {
+            int head_base = pad_base * static_cast<int32_t>(numHead) + static_cast<int32_t>(head) * static_cast<int32_t>(seqLenPaded);
 
-        TransposeParamsExt transposeParamsOut;
-        transposeParamsOut.nSize = 1;
-        transposeParamsOut.cSize = chunkSize;
-        transposeParamsOut.hSize = 1;
-        transposeParamsOut.wSize = numChunk;
-        transposeParamsOut.transposeType = TransposeType::TRANSPOSE_NCHW2NHWC;
-
-        DataCopy<float>(ub_temp0, gtransGlobal[g_index], dataLength);
-
-        SetFlag<HardEvent::MTE2_V>(0);
-        WaitFlag<HardEvent::MTE2_V>(0);
-
-        Transpose(ub_temp6, ub_temp0, stackBuffer, transposeParamsIn);
-
-        Duplicate<float>(ub_temp4, (float)0, chunkSize * chunkSize * 2);
-
-        for (int i = 0; i < 6; i++) {
-            if (dataLength >= 2048) {
-                uint32_t repeatTimes = ceil_div(dataLength, 2048);
-                for (int j = 0; j < repeatTimes; j++) {
-                    Add(ub_temp0[j * 2048], ub_temp0[ub_temp_size + j * 2048], ub_temp0[ub_temp_size + j * 2048 - (1 << i) * numChunk], 2048);
+            for (uint32_t chunk_base = 0; chunk_base < numChunkTotal; chunk_base += chunkTileMax) {
+                uint32_t numChunkTile = numChunkTotal - chunk_base;
+                if (numChunkTile > chunkTileMax) {
+                    numChunkTile = chunkTileMax;
                 }
-                DataCopy<float>(ub_temp0[ub_temp_size], ub_temp0, dataLength);
-            } else {
-                Add(ub_temp0[ub_temp_size], ub_temp0[ub_temp_size], ub_temp0[ub_temp_size - (1 << i) * numChunk], dataLength);
+                uint32_t dataLength = numChunkTile * chunkSize; // floats
+
+                // Load [numChunkTile, 64] into UB (contiguous in gtransGlobal by construction)
+                int g_index = head_base + static_cast<int32_t>(chunk_base * chunkSize);
+                DataCopy<float>(ub_temp0, gtransGlobal[g_index], dataLength);
+                SetFlag<HardEvent::MTE2_V>(0);
+                WaitFlag<HardEvent::MTE2_V>(0);
+
+                // Transpose to [64, numChunkTile] so that the same-chunk previous step is at offset -numChunkTile.
+                transposeParamsIn.cSize = numChunkTile;
+                transposeParamsOut.cSize = chunkSize;
+                transposeParamsOut.wSize = numChunkTile;
+                Transpose(ub_temp6, ub_temp0, stackBuffer, transposeParamsIn);
+                // Ensure transpose results are ready for vector scan.
+                PipeBarrier<PIPE_ALL>();
+
+                // Run parallel inclusive scan over the first dimension (t=64) directly on ub_temp6
+                // (flattened layout is [64, numChunkTile]).
+                // For each step, update rows [step..63] by adding the row (t-step).
+                for (uint32_t i = 0; i < 6; i++) { // 1,2,4,8,16,32
+                    uint32_t step = 1U << i;
+                    uint32_t row_offset = step * numChunkTile;
+                    uint32_t updateLen = (chunkSize - step) * numChunkTile;
+                    Add(ub_temp6[row_offset],
+                        ub_temp6[row_offset],
+                        ub_temp6[0],
+                        updateLen);
+                }
+                // Ensure scan updates are visible before transpose-back.
+                PipeBarrier<PIPE_ALL>();
+
+                // Transpose back to [numChunkTile, 64] and store to GM.
+                Transpose(ub_temp0, ub_temp6, stackBuffer, transposeParamsOut);
+                SetFlag<HardEvent::V_MTE3>(0);
+                WaitFlag<HardEvent::V_MTE3>(0);
+                DataCopy<float>(gcumsumGlobal[g_index], ub_temp0, dataLength);
+                SetFlag<HardEvent::MTE3_MTE2>(0);
+                WaitFlag<HardEvent::MTE3_MTE2>(0);
             }
         }
-
-        Transpose(ub_temp0, ub_temp6, stackBuffer, transposeParamsOut);
-
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-
-        DataCopy<float>(gcumsumGlobal[g_index], ub_temp0, dataLength);
-        SetFlag<HardEvent::MTE3_MTE2>(0);
-        WaitFlag<HardEvent::MTE3_MTE2>(0);
-        g_index = g_index + dataLength;
     }
 }
 
@@ -1023,12 +1049,36 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
 
     float q_scale = ((float)1.0) / __builtin_cce_sqrtf(headDimQKfp32);
 
-    TransposeBetaHalf();
+    // Load actual_seq_lengths (int32) to UB.
+    LocalTensor<int32_t> asl_ub = ub_temp0.ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> prefix_actual = asl_ub[batchSize];
+    LocalTensor<int32_t> prefix_padded = prefix_actual[batchSize + 1];
+    SetFlag<HardEvent::V_MTE2>(0);
+    WaitFlag<HardEvent::V_MTE2>(0);
+    DataCopy<int32_t>(asl_ub, aslGlobal, batchSize);
+    SetFlag<HardEvent::MTE2_V>(0);
+    WaitFlag<HardEvent::MTE2_V>(0);
+    // Compute prefix sums on device (cheap, B is small).
+    prefix_actual.SetValue(0, 0);
+    prefix_padded.SetValue(0, 0);
+    for (int i = 0; i < static_cast<int>(batchSize); i++) {
+        int32_t len_i = asl_ub.GetValue(i);
+        int32_t acc = prefix_actual.GetValue(i) + len_i;
+        prefix_actual.SetValue(i + 1, acc);
+        int32_t pad_i = ceil_div(static_cast<uint32_t>(MAX(len_i, 0)), chunkSize) * chunkSize;
+        int32_t acc_pad = prefix_padded.GetValue(i) + pad_i;
+        prefix_padded.SetValue(i + 1, acc_pad);
+    }
     PipeBarrier<PIPE_ALL>();
-    TransposeGFloat();
+
+    // Precompute beta/g transpose into workspace and g chunk-cumsum into workspace.
+    TransposeBetaHalfVlen(asl_ub, prefix_actual, prefix_padded);
     PipeBarrier<PIPE_ALL>();
-    GCumsumFloat();
+    TransposeGFloatVlen(asl_ub, prefix_actual, prefix_padded);
     PipeBarrier<PIPE_ALL>();
+    GCumsumFloatVlen(asl_ub, prefix_padded);
+    PipeBarrier<PIPE_ALL>();
+
     Duplicate(I, (float)0, 16 * 16);
     PipeBarrier<PIPE_ALL>();
     for (int l = 0; l < 16; l++) {
@@ -1041,12 +1091,28 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
     SetFlag<HardEvent::MTE3_MTE2>(4);
     SetFlag<HardEvent::MTE3_MTE2>(5);
     for (int bs = 0; bs < batchSize; bs++) {
+        int32_t seqLen = asl_ub.GetValue(bs);
+        if (seqLen <= 0) {
+            continue;
+        }
+        uint32_t seqLenU = static_cast<uint32_t>(seqLen);
+        uint32_t tailSeqLen = seqLenU % chunkSize;
+        uint32_t seqLenPaded = ceil_div(seqLenU, chunkSize) * chunkSize;
+        uint32_t numChunk = seqLenPaded / chunkSize;
+
+        int32_t t_base = prefix_actual.GetValue(bs);
+        int32_t pad_base = prefix_padded.GetValue(bs);
+
+        // TODO(vlen): per-batch transpose g/beta into workspace and compute gcumsum into workspace.
+        // For now, this preserves compilation while the kernel is being refactored end-to-end.
         for (int nh = 0; nh < singleCoreNumHead; nh++) {
             int head_index = nh + block_id * singleCoreNumHead;
-            for (int nc = 0; nc < (seqLenPaded / chunkSize); nc++) {
-                // [BS, SEQ_LEN, NUM_HEAD, QK_HEAD_DIM/V_HEAD_DIM] ---> [BS, NUM_HEAD, SEQ_LEN (NUM_CHUNK, CHUNK_SIZE), QK_HEAD_DIM/V_HEAD_DIM]
-                int index_base = (bs * numHead * seqLen + nc * numHead * chunkSize + head_index);
-                int gbeta_index = bs * numHead * seqLenPaded + head_index * seqLenPaded + nc * chunkSize;
+            for (int nc = 0; nc < static_cast<int>(numChunk); nc++) {
+                uint32_t valid = (nc == static_cast<int>(numChunk - 1) && tailSeqLen != 0) ? tailSeqLen : chunkSize;
+                // packed layout: [T, N, D]
+                int token_base = (t_base + nc * static_cast<int32_t>(chunkSize));
+                int index_base = (token_base * static_cast<int>(numHead) + head_index);
+                int gbeta_index = (pad_base * static_cast<int>(numHead) + head_index * static_cast<int>(seqLenPaded) + nc * static_cast<int>(chunkSize));
                 int ls_index = (bs * numHead + head_index) * headDimV * headDimQK;
                 DataCopy<half>(ub_temp1.ReinterpretCast<half>(), btransGlobal[gbeta_index], chunkSize);
 
@@ -1056,7 +1122,16 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
                 Cast(ub_temp1[chunkSize], ub_temp1.ReinterpretCast<half>(), RoundMode::CAST_NONE, chunkSize);
 
                 WaitFlag<HardEvent::MTE3_MTE2>(5);
-                LoadQKVHalfWithTail(ub_temp_half_0, kGlobal[index_base * headDimQK], headDimQK, nc);
+                // NOTE: LoadQKVHalfWithTail still uses fixed member seqLenPaded/tailSeqLen.
+                // Temporarily call the raw LoadQKVHalf with valid length (tail handled manually).
+                if (valid != chunkSize) {
+                    Duplicate<half>(ub_temp_half_0, (half)0, chunkSize * headDimQK);
+                    SetFlag<HardEvent::V_MTE2>(0);
+                    WaitFlag<HardEvent::V_MTE2>(0);
+                    LoadQKVHalf(ub_temp_half_0, kGlobal[index_base * headDimQK], headDimQK, valid);
+                } else {
+                    LoadQKVHalf(ub_temp_half_0, kGlobal[index_base * headDimQK], headDimQK, chunkSize);
+                }
                 SetFlag<HardEvent::V_MTE2>(0);
                 WaitFlag<HardEvent::V_MTE2>(0);
                 DataCopy<float>(ub_temp1, gcumsumGlobal[gbeta_index], chunkSize);
@@ -1064,7 +1139,7 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
 
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
-                if ((nc == ((seqLenPaded / chunkSize) - 1)) && (tailSeqLen != 0)) {
+                if ((nc == static_cast<int>(numChunk - 1)) && (tailSeqLen != 0)) {
                     Duplicate<float>(ub_temp12, (float)0, chunkSize * headDimQK);
                     L2normDim128FloatTrans(ub_temp_half_0, tailSeqLen);
                 } else {
@@ -1105,13 +1180,20 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
                 Mul<float>(ub_temp1[chunkSize * 2], ub_temp1, ub_temp1[chunkSize], chunkSize);
                 Mul<float>(ub_temp3, ub_temp3, ub_temp2, chunkSize * chunkSize);
                 
-                LoadQKVHalfWithTail(ub_temp_half_5, qGlobal[index_base * headDimQK], headDimQK, nc);
+                if (valid != chunkSize) {
+                    Duplicate<half>(ub_temp_half_5, (half)0, chunkSize * headDimQK);
+                    SetFlag<HardEvent::V_MTE2>(0);
+                    WaitFlag<HardEvent::V_MTE2>(0);
+                    LoadQKVHalf(ub_temp_half_5, qGlobal[index_base * headDimQK], headDimQK, valid);
+                } else {
+                    LoadQKVHalf(ub_temp_half_5, qGlobal[index_base * headDimQK], headDimQK, chunkSize);
+                }
                 Inv_bisec16_opt<true>(ub_temp3, ub_temp3);
 
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
 
-                if ((nc == ((seqLenPaded / chunkSize) - 1)) && (tailSeqLen != 0)) {
+                if ((nc == static_cast<int>(numChunk - 1)) && (tailSeqLen != 0)) {
                     Duplicate<float>(ub_temp12, (float)0, chunkSize * headDimQK);
                     L2normDim128FloatTrans(ub_temp_half_5, tailSeqLen);
                 } else {
@@ -1166,7 +1248,14 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
                     SetFlag<HardEvent::V_MTE2>(0);
                     WaitFlag<HardEvent::V_MTE2>(0);
 
-                    LoadQKVHalfWithTail(ub_temp_half_0, vGlobal[index_base * headDimV], headDimV, nc);
+                    if (valid != chunkSize) {
+                        Duplicate<half>(ub_temp_half_0, (half)0, chunkSize * headDimV);
+                        SetFlag<HardEvent::V_MTE2>(0);
+                        WaitFlag<HardEvent::V_MTE2>(0);
+                        LoadQKVHalf(ub_temp_half_0, vGlobal[index_base * headDimV], headDimV, valid);
+                    } else {
+                        LoadQKVHalf(ub_temp_half_0, vGlobal[index_base * headDimV], headDimV, chunkSize);
+                    }
                     SetFlag<HardEvent::MTE2_V>(1);
                 }
 
@@ -1212,11 +1301,7 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
                 if (nc != 0) {
                     SetFlag<HardEvent::V_MTE2>(0);
                     WaitFlag<HardEvent::V_MTE2>(0);
-                    if (nc == 0) {
-                        DataCopy(ub_temp9, isGlobal[ls_index], headDimV * headDimQK);
-                    } else {
-                        DataCopy(ub_temp9, lsGlobal[ls_index], headDimV * headDimQK);
-                    }
+                    DataCopy(ub_temp9, lsGlobal[ls_index], headDimV * headDimQK);
                     SetFlag<HardEvent::MTE2_V>(0);
                 }
 
@@ -1227,7 +1312,12 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
 
 
                 WaitFlag<HardEvent::V_MTE3>(0);
-                StoreAttnHalfWithTail(attnGlobal[index_base * headDimV], ub_temp_half_0, headDimV, nc);
+                // Store only valid tokens for tail chunk; avoid overwriting next batch in packed layout.
+                if (valid != chunkSize) {
+                    StoreAttnHalf(attnGlobal[index_base * headDimV], ub_temp_half_0, headDimV, valid);
+                } else {
+                    StoreAttnHalf(attnGlobal[index_base * headDimV], ub_temp_half_0, headDimV, chunkSize);
+                }
                 SetFlag<HardEvent::MTE3_MTE2>(5);
                 SetFlag<HardEvent::MTE3_MTE1>(1);
                 WaitFlag<HardEvent::MTE3_MTE1>(0);
@@ -1262,13 +1352,12 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Process() {
 }
 
 
-__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
+__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloatVlen(LocalTensor<int32_t> asl_ub,
+                                                                          LocalTensor<int32_t> prefix_actual,
+                                                                          LocalTensor<int32_t> prefix_padded) {
     int blockLen = 16;
     int width = 8;
     int headGroupNum = numHead / width;
-    int seqLenGroupNum = seqLenPaded / blockLen;
-    int blockTailSeqLen = seqLen % blockLen;
-    int fullBlockGroupNum = ceil_div(seqLen, blockLen);
 
     DataCopyParams repeatParams_in;
     repeatParams_in.blockLen = width * 4 / 32;
@@ -1291,7 +1380,6 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
     TransDataTo5HDParams transDataParams;
     transDataParams.dstHighHalf = false;
     transDataParams.srcHighHalf = false;
-    transDataParams.repeatTimes = seqLenGroupNum;
     transDataParams.dstRepStride = blockLen;
     transDataParams.srcRepStride = blockLen;
 
@@ -1304,21 +1392,36 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
         srcLocalList[b] = (uint64_t)(ub_temp0[width * b].GetPhyAddr());
     }
 
-    for (int i = 0; i < batchSize; i++) {
+    for (int i = 0; i < static_cast<int>(batchSize); i++) {
+        int32_t seqLen = asl_ub.GetValue(i);
+        if (seqLen <= 0) {
+            continue;
+        }
+        uint32_t seqLenU = static_cast<uint32_t>(seqLen);
+        uint32_t seqLenPaded = ceil_div(seqLenU, static_cast<uint32_t>(blockLen)) * static_cast<uint32_t>(blockLen);
+        uint32_t seqLenGroupNum = seqLenPaded / static_cast<uint32_t>(blockLen);
+        uint32_t blockTailSeqLen = seqLenU % static_cast<uint32_t>(blockLen);
+        uint32_t fullBlockGroupNum = ceil_div(seqLenU, static_cast<uint32_t>(blockLen));
+
+        int32_t t_base = prefix_actual.GetValue(i);
+        int32_t pad_base = prefix_padded.GetValue(i);
+
         for (int j_index = 0; j_index < headGroupNum; j_index++) {
             // UB tiling: ub_temp0/ub_temp8 each has 32768 floats => max repeats = 32768 / (width*blockLen) = 256
             const int maxSeqTile = 256;
-            for (int k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
-                int k_tile = seqLenGroupNum - k_base;
+            for (uint32_t k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
+                uint32_t k_tile = seqLenGroupNum - k_base;
                 if (k_tile > maxSeqTile) {
                     k_tile = maxSeqTile;
                 }
 
                 // Load a tile of [k_base, k_base + k_tile) blocks into ub_temp0
-                for (int kk = 0; kk < k_tile; kk++) {
-                    int k_index = k_base + kk;
+                for (uint32_t kk = 0; kk < k_tile; kk++) {
+                    uint32_t k_index = k_base + kk;
                     if (k_index < fullBlockGroupNum) {
-                        int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * width;
+                        int src_index = (t_base * static_cast<int32_t>(numHead)) +
+                                        (static_cast<int32_t>(k_index) * static_cast<int32_t>(numHead) * blockLen) +
+                                        (j_index * width);
                         if (k_index == (fullBlockGroupNum - 1) && blockTailSeqLen != 0) {
                             Duplicate(ub_temp0[kk * width * blockLen], (float)0, width * blockLen);
                             SetFlag<HardEvent::V_MTE2>(0);
@@ -1343,9 +1446,11 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
                 WaitFlag<HardEvent::V_MTE3>(0);
 
                 // Store the tile from ub_temp8 back to GM
-                for (int kk = 0; kk < k_tile; kk++) {
-                    int k_index = k_base + kk;
-                    int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * width + k_index * blockLen;
+                for (uint32_t kk = 0; kk < k_tile; kk++) {
+                    uint32_t k_index = k_base + kk;
+                    int dst_index = (pad_base * static_cast<int32_t>(numHead)) +
+                                    (j_index * static_cast<int32_t>(seqLenPaded) * width) +
+                                    (static_cast<int32_t>(k_index) * blockLen);
                     DataCopy<float>(gtransGlobal[dst_index], ub_temp8[kk * width * blockLen], repeatParams_out);
                 }
 
@@ -1359,12 +1464,11 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloat() {
 }
 
 
-__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
+__aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalfVlen(LocalTensor<int32_t> asl_ub,
+                                                                            LocalTensor<int32_t> prefix_actual,
+                                                                            LocalTensor<int32_t> prefix_padded) {
     int blockLen = 16;
     int headGroupNum = numHead / blockLen;
-    int seqLenGroupNum = seqLenPaded / blockLen;
-    int blockTailSeqLen = seqLen % blockLen;
-    int fullBlockGroupNum = ceil_div(seqLen, blockLen);
 
     DataCopyParams repeatParams_in;
     repeatParams_in.blockLen = blockLen * 2 / 32;
@@ -1387,14 +1491,26 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
     TransDataTo5HDParams transDataParams;
     transDataParams.dstHighHalf = false;
     transDataParams.srcHighHalf = false;
-    transDataParams.repeatTimes = seqLenGroupNum * headGroupNum;
     transDataParams.dstRepStride = blockLen;
     transDataParams.srcRepStride = blockLen;
 
     LocalTensor<half> ub_temp_half_1 = ub_temp0.ReinterpretCast<half>();
     LocalTensor<half> ub_temp_half_2 = ub_temp8.ReinterpretCast<half>();
 
-    for (int i = 0; i < batchSize; i++) {
+    for (int i = 0; i < static_cast<int>(batchSize); i++) {
+        int32_t seqLen = asl_ub.GetValue(i);
+        if (seqLen <= 0) {
+            continue;
+        }
+        uint32_t seqLenU = static_cast<uint32_t>(seqLen);
+        uint32_t seqLenPaded = ceil_div(seqLenU, static_cast<uint32_t>(blockLen)) * static_cast<uint32_t>(blockLen);
+        uint32_t seqLenGroupNum = seqLenPaded / static_cast<uint32_t>(blockLen);
+        uint32_t blockTailSeqLen = seqLenU % static_cast<uint32_t>(blockLen);
+        uint32_t fullBlockGroupNum = ceil_div(seqLenU, static_cast<uint32_t>(blockLen));
+
+        int32_t t_base = prefix_actual.GetValue(i);
+        int32_t pad_base = prefix_padded.GetValue(i);
+
         // Tile over seqLenGroupNum for each head group to avoid UB overflow.
         // One repeat is one 16x16 beta block (256 half). UB window (ub_temp_half_1/2) has 65536 half.
         // Max repeats per tile: 65536 / 256 = 256.
@@ -1408,17 +1524,19 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
         }
 
         for (int j_index = 0; j_index < headGroupNum; j_index++) {
-            for (int k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
-                int k_tile = seqLenGroupNum - k_base;
+            for (uint32_t k_base = 0; k_base < seqLenGroupNum; k_base += maxSeqTile) {
+                uint32_t k_tile = seqLenGroupNum - k_base;
                 if (k_tile > maxSeqTile) {
                     k_tile = maxSeqTile;
                 }
 
                 // Load k_tile blocks for this head group into UB
-                for (int kk = 0; kk < k_tile; kk++) {
-                    int k_index = k_base + kk;
+                for (uint32_t kk = 0; kk < k_tile; kk++) {
+                    uint32_t k_index = k_base + kk;
                     if (k_index < fullBlockGroupNum) {
-                        int src_index = i * numHead * seqLen + k_index * numHead * blockLen + j_index * blockLen;
+                        int src_index = (t_base * static_cast<int32_t>(numHead)) +
+                                        (static_cast<int32_t>(k_index) * static_cast<int32_t>(numHead) * blockLen) +
+                                        (j_index * blockLen);
                         if (k_index == (fullBlockGroupNum - 1) && blockTailSeqLen != 0) {
                             Duplicate(ub_temp_half_1[kk * blockLen * blockLen], (half)0, blockLen * blockLen);
                             SetFlag<HardEvent::V_MTE2>(0);
@@ -1443,9 +1561,11 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
                 WaitFlag<HardEvent::V_MTE3>(0);
 
                 // Store k_tile blocks back to GM
-                for (int kk = 0; kk < k_tile; kk++) {
-                    int k_index = k_base + kk;
-                    int dst_index = i * numHead * seqLenPaded + j_index * seqLenPaded * blockLen + k_index * blockLen;
+                for (uint32_t kk = 0; kk < k_tile; kk++) {
+                    uint32_t k_index = k_base + kk;
+                    int dst_index = (pad_base * static_cast<int32_t>(numHead)) +
+                                    (j_index * static_cast<int32_t>(seqLenPaded) * blockLen) +
+                                    (static_cast<int32_t>(k_index) * blockLen);
                     DataCopy<half>(btransGlobal[dst_index], ub_temp_half_2[kk * blockLen * blockLen], repeatParams_out);
                 }
 
@@ -1458,12 +1578,13 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalf() {
     }
 }
 
-extern "C" __global__ __aicore__ void chunk_gated_delta_rule_v310(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR core_attn, GM_ADDR last_recurrent_state, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void chunk_gated_delta_rule_v310(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR g, GM_ADDR beta, GM_ADDR actual_seq_lengths,
+                                                                  GM_ADDR core_attn, GM_ADDR last_recurrent_state, GM_ADDR workspace, GM_ADDR tiling) {
     REGISTER_TILING_DEFAULT(ChunkGatedDeltaRuleTilingData);
     GET_TILING_DATA(tiling_data, tiling);
     TPipe pipe;
     ChunkGatedDeltaRuleV310Kernel kernel;
-    kernel.Init(query, key, value, g, beta, core_attn, last_recurrent_state, workspace, tiling_data, &pipe);
+    kernel.Init(query, key, value, g, beta, actual_seq_lengths, core_attn, last_recurrent_state, workspace, tiling_data, &pipe);
     kernel.Process();
     PipeBarrier<PIPE_ALL>();
 }

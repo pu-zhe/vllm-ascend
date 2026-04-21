@@ -22,16 +22,17 @@ std::tuple<at::Tensor, at::Tensor> npu_chunk_gated_delta_rule_310(
     const at::Tensor& key,
     const at::Tensor& value,
     const at::Tensor& g,
-    const at::Tensor& beta)
+    const at::Tensor& beta,
+    const at::Tensor& actual_seq_lengths)
 {
     at::Tensor out = at::empty(value.sizes(), value.options());
-    auto batch_size = query.sizes()[0];
-    auto headnum = value.sizes()[2];
-    auto headdim_k = key.sizes()[3];
-    auto headdim_v = value.sizes()[3];
+    auto batch_size = actual_seq_lengths.sizes()[0];
+    auto headnum = value.sizes()[1];
+    auto headdim_k = key.sizes()[2];
+    auto headdim_v = value.sizes()[2];
     at::Tensor final_state = at::empty({batch_size, headnum, headdim_k, headdim_v}, value.options().dtype(at::kFloat));
 
-    EXEC_NPU_CMD(aclnnChunkGatedDeltaRuleV310, query, key, value, g, beta, out, final_state);
+    EXEC_NPU_CMD(aclnnChunkGatedDeltaRuleV310, query, key, value, g, beta, actual_seq_lengths, out, final_state);
     return {out, final_state};
 }
 

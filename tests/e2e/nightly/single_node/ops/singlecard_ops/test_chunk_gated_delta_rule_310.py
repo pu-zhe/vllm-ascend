@@ -9,13 +9,14 @@ from vllm_ascend.utils import enable_custom_op
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
-def npu_chunk_gated_delta_rule_310(q, k, v, g, beta):
+def npu_chunk_gated_delta_rule_310(q, k, v, g, beta, actual_seq_lengths):
     out, state = torch.ops._C_ascend.npu_chunk_gated_delta_rule_310(
         query=q,
         key=k,
         value=v,
         g=g,
-        beta=beta
+        beta=beta,
+        actual_seq_lengths=actual_seq_lengths,
     )
     return out, state
 
@@ -177,8 +178,8 @@ def test_fused_chunk_gated_delta_rule_310(batch_size, seqlen, headnum, headdim_k
         q = q.repeat_interleave(headnum_v // headnum_k, dim=-2)
         k = k.repeat_interleave(headnum_v // headnum_k, dim=-2)
     initial_state = None
-    actual_seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32)
-    cu_seqlens = F.pad(actual_seq_lengths, (1, 0)).cumsum(dim=0)
+    actual_seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32).npu()
+    cu_seqlens = F.pad(actual_seq_lengths.cpu(), (1, 0)).cumsum(dim=0)
     out_golden, state_golden = golden_chunk_gated_delta_rule(
         q.clone().unsqueeze(0),
         k.clone().unsqueeze(0),
@@ -186,13 +187,8 @@ def test_fused_chunk_gated_delta_rule_310(batch_size, seqlen, headnum, headdim_k
         g.clone().unsqueeze(0),
         beta.clone().unsqueeze(0),
         cu_seqlens)
-    out_golden = out_golden.view(batch_size, -1, headnum_v, headdim_v)
-    out, state = npu_chunk_gated_delta_rule_310(
-        q.view(batch_size, -1, headnum_v, headdim_k),
-        k.view(batch_size, -1, headnum_v, headdim_k),
-        v.view(batch_size, -1, headnum_v, headdim_v),
-        g.view(batch_size, -1, headnum_v),
-        beta.view(batch_size, -1, headnum_v))
+    out_golden = out_golden.squeeze(0)
+    out, state = npu_chunk_gated_delta_rule_310(q, k, v, g, beta, actual_seq_lengths)
 
     torch.testing.assert_close(
         out.to(torch.float32).cpu(),
