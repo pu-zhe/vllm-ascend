@@ -526,13 +526,14 @@ std::tuple<at::Tensor, at::Tensor> npu_chunk_gated_delta_rule_310_meta(
     const at::Tensor& key,
     const at::Tensor& value,
     const at::Tensor& g,
-    const at::Tensor& beta)
+    const at::Tensor& beta,
+    const at::Tensor& actual_seq_lengths)
 {
     at::Tensor out = at::empty_symint(value.sym_sizes(), value.options());
-    auto batch_size = query.sym_sizes()[1];
-    auto headnum = value.sym_sizes()[2];
-    auto headdim_k = key.sym_sizes()[3];
-    auto headdim_v = value.sym_sizes()[3];
+    auto batch_size = actual_seq_lengths.sym_sizes()[0];
+    auto headnum = value.sym_sizes()[1];
+    auto headdim_k = key.sym_sizes()[2];
+    auto headdim_v = value.sym_sizes()[2];
     at::Tensor final_state = at::empty_symint({batch_size, headnum, headdim_k, headdim_v}, value.options().dtype(at::kFloat));
     return {out, final_state};
 }

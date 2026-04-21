@@ -178,7 +178,7 @@ def test_fused_chunk_gated_delta_rule_310(batch_size, seqlen, headnum, headdim_k
         q = q.repeat_interleave(headnum_v // headnum_k, dim=-2)
         k = k.repeat_interleave(headnum_v // headnum_k, dim=-2)
     initial_state = None
-    actual_seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32).npu()
+    actual_seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32)
     cu_seqlens = F.pad(actual_seq_lengths.cpu(), (1, 0)).cumsum(dim=0)
     out_golden, state_golden = golden_chunk_gated_delta_rule(
         q.clone().unsqueeze(0),

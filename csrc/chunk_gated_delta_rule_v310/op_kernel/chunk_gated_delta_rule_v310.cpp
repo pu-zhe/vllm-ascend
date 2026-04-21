@@ -250,14 +250,9 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::LoadQKVHalfWithTail(LocalT
                                                                           GlobalTensor<half> src,
                                                                           uint32_t head_dim,
                                                                           uint32_t chunk_index) {
-    if ((chunk_index == ((seqLenPaded / chunkSize) - 1)) && (tailSeqLen != 0)) {
-        Duplicate<half>(dst, (half)0, chunkSize * head_dim);
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        LoadQKVHalf(dst, src, head_dim, tailSeqLen);
-    } else {
-        LoadQKVHalf(dst, src, head_dim, chunkSize);
-    }
+    // Deprecated in vlen mode. Kept only to avoid build failures in legacy paths.
+    (void)chunk_index;
+    LoadQKVHalf(dst, src, head_dim, chunkSize);
 }
 
 __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::StoreAttnHalf(GlobalTensor<half> dst,
@@ -276,11 +271,9 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::StoreAttnHalfWithTail(Glob
                                                                               LocalTensor<half> src,
                                                                               uint32_t head_dim,
                                                                               uint32_t chunk_index) {
-    if ((chunk_index == ((seqLenPaded / chunkSize) - 1)) && (tailSeqLen != 0)) {
-        StoreAttnHalf(dst, src, head_dim, tailSeqLen);
-    } else {
-        StoreAttnHalf(dst, src, head_dim, chunkSize);
-    }
+    // Deprecated in vlen mode. Kept only to avoid build failures in legacy paths.
+    (void)chunk_index;
+    StoreAttnHalf(dst, src, head_dim, chunkSize);
 }
 
 __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::Transpose_64_128() {
@@ -1369,12 +1362,10 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloatVlen(LocalT
     repeatParams_in_tail.blockLen = width * 4 / 32;
     repeatParams_in_tail.srcGap = width * (headGroupNum - 1) * 4 / 32;
     repeatParams_in_tail.dstGap = 0;
-    repeatParams_in_tail.blockCount = blockTailSeqLen;
 
     DataCopyParams repeatParams_out;
     repeatParams_out.blockLen = blockLen * 4 / 32;
     repeatParams_out.srcGap = 0;
-    repeatParams_out.dstGap = blockLen * (seqLenGroupNum - 1) * 4 / 32;
     repeatParams_out.blockCount = width;
 
     TransDataTo5HDParams transDataParams;
@@ -1402,6 +1393,9 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeGFloatVlen(LocalT
         uint32_t seqLenGroupNum = seqLenPaded / static_cast<uint32_t>(blockLen);
         uint32_t blockTailSeqLen = seqLenU % static_cast<uint32_t>(blockLen);
         uint32_t fullBlockGroupNum = ceil_div(seqLenU, static_cast<uint32_t>(blockLen));
+
+        repeatParams_in_tail.blockCount = blockTailSeqLen;
+        repeatParams_out.dstGap = blockLen * (seqLenGroupNum - 1) * 4 / 32;
 
         int32_t t_base = prefix_actual.GetValue(i);
         int32_t pad_base = prefix_padded.GetValue(i);
@@ -1480,12 +1474,10 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalfVlen(Loca
     repeatParams_in_tail.blockLen = blockLen * 2 / 32;
     repeatParams_in_tail.srcGap = blockLen * (headGroupNum - 1) * 2 / 32;
     repeatParams_in_tail.dstGap = 0;
-    repeatParams_in_tail.blockCount = blockTailSeqLen;
 
     DataCopyParams repeatParams_out;
     repeatParams_out.blockLen = blockLen * 2 / 32;
     repeatParams_out.srcGap = 0;
-    repeatParams_out.dstGap = blockLen * (seqLenGroupNum - 1) * 2 / 32;
     repeatParams_out.blockCount = blockLen;
 
     TransDataTo5HDParams transDataParams;
@@ -1507,6 +1499,9 @@ __aicore__ inline void ChunkGatedDeltaRuleV310Kernel::TransposeBetaHalfVlen(Loca
         uint32_t seqLenGroupNum = seqLenPaded / static_cast<uint32_t>(blockLen);
         uint32_t blockTailSeqLen = seqLenU % static_cast<uint32_t>(blockLen);
         uint32_t fullBlockGroupNum = ceil_div(seqLenU, static_cast<uint32_t>(blockLen));
+
+        repeatParams_in_tail.blockCount = blockTailSeqLen;
+        repeatParams_out.dstGap = blockLen * (seqLenGroupNum - 1) * 2 / 32;
 
         int32_t t_base = prefix_actual.GetValue(i);
         int32_t pad_base = prefix_padded.GetValue(i);
