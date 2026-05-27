@@ -17,6 +17,7 @@
 
 from typing import Any
 
+import torch
 import torch_npu
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
@@ -187,7 +188,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         output = output[:num_actual_tokens]
 
         # Calculate query lengths from start locations
-        qsl_cpu = attn_metadata.query_start_loc.cpu()
+        qsl_cpu = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
         qlens = qsl_cpu[1:] - qsl_cpu[:-1]
 
         context_lens = attn_metadata.seq_lens
@@ -215,6 +216,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         return output
 
+    def forward_spec_decoding_310(self, query, attn_metadata, output):
+        """Execute SpecDecoding on 310P using full query rows plus splitfuse mask."""
+        return self.forward_chunked_prefill_310(query, attn_metadata, output)
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """
         Main dispatch method for attention operations.
@@ -241,6 +246,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Condition for DecodeOnly: Pure decoding phase where each request generates one token
         elif state == AscendAttentionState.DecodeOnly:
             output = self.forward_paged_attention(query, attn_metadata, output)
+        elif state == AscendAttentionState.SpecDecoding:
+            output = self.forward_spec_decoding_310(query, attn_metadata, output)
         # Condition for ChunkedPrefill:
         # 1. During speculative decoding scenarios (except mtp)
         # 2. Processing large prefill requests in chunks

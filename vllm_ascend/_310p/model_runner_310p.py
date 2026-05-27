@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from contextlib import contextmanager, nullcontext
 
 import numpy as np
@@ -26,6 +27,7 @@ import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -34,6 +36,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.outputs import DraftTokenIds
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.cp_utils import (
+    get_total_cp_world_size,
 )
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
@@ -210,6 +218,45 @@ class NPUModelRunner310(NPUModelRunner):
             **model_kwargs,
         )
 
+    def _patch_local_mtp_scheduler_output(self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
+        if (
+            not self.use_async_scheduling
+            or self.speculative_config is None
+            or self.speculative_config.method != "mtp"
+            or self._draft_token_ids is None
+        ):
+            return scheduler_output
+
+        if not scheduler_output.scheduled_spec_decode_tokens:
+            return scheduler_output
+
+        if isinstance(self._draft_token_ids, torch.Tensor):
+            local_draft_token_ids = self._draft_token_ids.tolist()
+        else:
+            local_draft_token_ids = self._draft_token_ids
+
+        patched_scheduler_output = deepcopy(scheduler_output)
+        patched = False
+        for req_id, req_idx in self.input_batch.req_id_to_index.items():
+            scheduled_spec_token_ids = patched_scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+            if scheduled_spec_token_ids is None or req_idx >= len(local_draft_token_ids):
+                continue
+            if all(token < 0 for token in scheduled_spec_token_ids):
+                patched_scheduler_output.scheduled_spec_decode_tokens[req_id] = list(local_draft_token_ids[req_idx])
+                patched = True
+
+        if patched:
+            return patched_scheduler_output
+        return scheduler_output
+
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors=None,
+    ):
+        scheduler_output = self._patch_local_mtp_scheduler_output(scheduler_output)
+        return super().execute_model(scheduler_output, intermediate_tensors)
+
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends,
@@ -379,7 +426,7 @@ class NPUModelRunner310(NPUModelRunner):
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
             if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
                 prev_common_req_indices.append(prev_index)
-                draft_len = len(scheduled_spec_tokens.get(req_id, ()))
+                draft_len = sum(token >= 0 for token in scheduled_spec_tokens.get(req_id, ()))
                 total_num_spec_tokens += draft_len
                 flattened_index = cu_num_tokens[cur_index].item() - 1
                 sample_flattened_indices.append(flattened_index - draft_len)
@@ -434,6 +481,124 @@ class NPUModelRunner310(NPUModelRunner):
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        if self.speculative_config is None or self.speculative_config.method != "mtp":
+            return super().take_draft_token_ids()
+
+        if self._draft_token_ids is None:
+            return None
+
+        if isinstance(self._draft_token_ids, torch.Tensor):
+            token_ids = self._draft_token_ids.tolist()
+        else:
+            token_ids = self._draft_token_ids
+
+        draft_token_ids = DraftTokenIds(self.input_batch.req_ids.copy(), token_ids)
+        self._draft_token_ids = None
+        return draft_token_ids
+
+    def _bookkeeping_sync(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> tuple[
+        LogprobsLists | None,
+        list[list[int]],
+        dict[str, LogprobsTensors | None],
+        list[str],
+        dict[str, int],
+        list[int],
+    ]:
+        # Keep mtp async bookkeeping behavior scoped to 310P.
+        if not (
+            self.use_async_scheduling
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+        ):
+            return super()._bookkeeping_sync(
+                scheduler_output,
+                sampler_output,
+                logits,
+                hidden_states,
+                num_scheduled_tokens,
+                spec_decode_metadata,
+            )
+
+        discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
+        for i in discard_sampled_tokens_req_indices:
+            gen = self.input_batch.generators.get(int(i))
+            if gen is not None:
+                gen.set_offset(gen.get_offset() - 4)
+
+        req_ids_output_copy = self.input_batch.req_ids.copy()
+        req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
+
+        num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
+        sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
+
+        valid_sampled_token_ids: list[list[int]] = []
+        invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
+        invalid_req_indices_set = set(invalid_req_indices)
+        cu_num_tokens: list[int] | None = None
+
+        valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
+            sampled_token_ids,
+            self.input_batch.vocab_size,
+            discard_sampled_tokens_req_indices,
+            logprobs_tensors=logprobs_tensors,
+        )
+        # MTP on 310P can run with placeholder drafts (-1). In this case
+        # the real accepted token is already materialized in sampled_token_ids,
+        # and must be cached for the next step.
+        self.input_batch.prev_sampled_token_ids = sampled_token_ids[:, :1].contiguous()
+
+        self.input_batch.prev_req_id_to_index = {
+            req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
+        }
+
+        req_ids = self.input_batch.req_ids
+        for req_idx in range(num_sampled_tokens):
+            sampled_ids = valid_sampled_token_ids[req_idx]
+            num_sampled_ids = len(sampled_ids) if sampled_ids else 0
+            if not sampled_ids:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            end_idx = start_idx + num_sampled_ids
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}"
+            )
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+
+            req_id = req_ids[req_idx]
+            req_state = self.requests[req_id]
+            req_state.output_token_ids.extend(sampled_ids)
+
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states[:num_scheduled_tokens],
+            scheduler_output.num_scheduled_tokens,
+        )
+
+        return (
+            None,
+            valid_sampled_token_ids,
+            prompt_logprobs_dict,
+            req_ids_output_copy,
+            req_id_to_index_output_copy,
+            invalid_req_indices,
+        )
+
     def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
@@ -477,6 +642,19 @@ class NPUModelRunner310(NPUModelRunner):
             else:
                 self.kernel_block_sizes.append([0])
 
+        max_num_blocks = []
+        max_model_len = max(self.max_model_len, self.max_encoder_len)
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
+            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                mamba_blocks_per_req = (
+                    max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
+                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+
+                max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
+            max_num_blocks.append(max_num_blocks_per_req)
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
@@ -500,4 +678,5 @@ class NPUModelRunner310(NPUModelRunner):
                     else 0
                 ),
                 kernel_block_sizes=self.kernel_block_sizes,
+                max_num_blocks_per_req=max_num_blocks,
             )
